@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 from p009_common import DEFAULT_ADDON, DEFAULT_HOST, DEFAULT_REMOTE_TEMPLATE, DEFAULT_Z2M_DIR, configure_remote, die
-from p009_deploy import cmd_arm, cmd_finalize, cmd_postflash, cmd_report, cmd_restore_data, cmd_snapshot, cmd_status
+from p009_deploy import cmd_arm, cmd_confirm_flash, cmd_finalize, cmd_postflash, cmd_report, cmd_restore_data, cmd_snapshot, cmd_status
 from p009_accept import cmd_acceptance
 
 
@@ -30,6 +30,13 @@ def parser() -> argparse.ArgumentParser:
     a.add_argument("--replace-session", action="store_true")
     a.add_argument("--confirm", required=True)
     a.set_defaults(func=cmd_arm)
+
+    cf = sub.add_parser("confirm-flash")
+    cf.add_argument("--session", type=Path, required=True)
+    cf.add_argument("--observed-sha256", required=True, help="exact SHA256 printed by ARM for the GBL uploaded in WebUI")
+    cf.add_argument("--webui-note", default="WebUI reported successful firmware upload")
+    cf.add_argument("--confirm", required=True)
+    cf.set_defaults(func=cmd_confirm_flash)
 
     pf = sub.add_parser("postflash")
     pf.add_argument("--session", type=Path, required=True)
