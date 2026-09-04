@@ -13,6 +13,7 @@ DEPLOY = ROOT / "deploy"
 if str(DEPLOY) not in sys.path:
     sys.path.insert(0, str(DEPLOY))
 
+from decode_ncp_counters import decode_line, summary
 from p009_accept import parse_json_output
 from p009_common import appended_logs, compare_identity, configure_remote, remote_argv, safe_identity_from_backup_doc
 from p009_deploy import PHASE_ARMED, PHASE_FLASH, PHASE_IDENTITY, cmd_confirm_flash, require_phase, runtime_readbacks, validate_session_target
@@ -119,6 +120,37 @@ class P009Tests(unittest.TestCase):
             )
             cmd_confirm_flash(args)
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["phase"], PHASE_FLASH)
+
+    def test_ncp_counter_decoder_extracts_pressure_signals(self):
+        values = [0] * 42
+        values[18] = 1
+        values[27] = 2
+        values[31] = 3
+        values[32] = 4
+        values[33] = 5
+        values[40] = 6
+        line = "2026-09-04 10:11:12 info: zh:ember: [NCP COUNTERS] " + ",".join(map(str, values))
+        rec = decode_line(line, source="test.log", line_number=7)
+        self.assertIsNotNone(rec)
+        assert rec is not None
+        self.assertEqual(rec["timestamp"], "2026-09-04 10:11:12")
+        self.assertEqual(rec["selected"]["BROADCAST_TABLE_FULL"], 5)
+        self.assertEqual(rec["selected"]["NWK_RETRY_OVERFLOW"], 3)
+        self.assertEqual(rec["nonzero_pressure"]["ADDRESS_CONFLICT_SENT"], 6)
+
+    def test_ncp_counter_summary_aggregates_intervals(self):
+        records = []
+        for btt in (0, 2, 3):
+            values = [0] * 42
+            values[33] = btt
+            rec = decode_line("[NCP COUNTERS] " + ",".join(map(str, values)), source="x", line_number=1)
+            assert rec is not None
+            records.append(rec)
+        report = summary(records)
+        self.assertEqual(report["intervals"], 3)
+        self.assertEqual(report["totals"]["BROADCAST_TABLE_FULL"], 5)
+        self.assertEqual(report["max_per_interval"]["BROADCAST_TABLE_FULL"], 3)
+        self.assertEqual(report["nonzero_intervals"]["BROADCAST_TABLE_FULL"], 2)
 
 
 if __name__ == "__main__":
