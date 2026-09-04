@@ -45,11 +45,22 @@ def main() -> None:
     path = root / TARGET
     if not path.is_file():
         die(f"missing {TARGET}")
-    text = path.read_text(encoding="utf-8")
-    if "[P009 EZSP]" in text:
+
+    original = path.read_text(encoding="utf-8")
+    if "[P009 EZSP]" in original:
         die("target already appears patched")
-    text = replace_once(text, HELPER_ANCHOR, P009_HELPER + HELPER_ANCHOR, "helper insertion")
+
+    # The exact source commit is pinned above. P009 performs exactly two textual
+    # operations: inserts one helper immediately before the existing config setter,
+    # and replaces the one SUPPORTED_NETWORKS initialization anchor with the six
+    # set+readback calls. Existing stock queue/BUSY handling is deliberately retained.
+    text = replace_once(original, HELPER_ANCHOR, P009_HELPER + HELPER_ANCHOR, "helper insertion")
     text = replace_once(text, INIT_OLD, INIT_NEW, "initEzsp policy")
+
+    expected = original.replace(HELPER_ANCHOR, P009_HELPER + HELPER_ANCHOR, 1).replace(INIT_OLD, INIT_NEW, 1)
+    if text != expected:
+        die("patch changed content outside the two approved anchors")
+
     expected_calls = {
         "BROADCAST_TABLE_SIZE": 64,
         "NEW_BROADCAST_ENTRY_THRESHOLD": 48,
@@ -62,10 +73,10 @@ def main() -> None:
         pat = rf"p009SetAndVerifyEzspConfigValue\(EzspConfigId\.{name}, {value}\)"
         if len(re.findall(pat, text)) != 1:
             die(f"runtime invariant missing/duplicated: {name}={value}")
-    forbidden = ("QUEUE_BUSY_DEFER_MSEC", "Failed to send request attempt", "permitJoin atomicity")
-    for marker in forbidden:
-        if marker in text:
-            die(f"unexpected P007-style behavior in pinned 10.9.1 source: {marker}")
+
+    # Do not reject stock 10.9.1's own QUEUE_BUSY_DEFER_MSEC behavior. The pinned
+    # source already contains it; the exact-anchor equality above proves P009 does
+    # not alter that send/retry logic.
     path.write_text(text, encoding="utf-8")
     print("P009 zigbee-herdsman runtime policy applied")
     print("  broadcast table readback:          64")
@@ -74,7 +85,7 @@ def main() -> None:
     print("  MTORR flow control:                 1")
     print("  supported networks:                 1")
     print("  multicast-to-sleepy-address:        0")
-    print("  send/retry/routing logic changed:   NO")
+    print("  existing stock send/retry logic:    UNCHANGED")
 
 
 if __name__ == "__main__":
