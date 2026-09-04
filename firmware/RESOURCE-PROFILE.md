@@ -6,12 +6,15 @@ Pinned builder: `Nerivec/silabs-firmware-builder@858c34b0eb6f53a2e0c89455ea489ce
 
 Pinned stack/toolchain: Simplicity SDK 2026.6.1, EmberZNet 9.1.1, EZSP 19, GCC 14.2.1.
 
-P009 changes exactly two compile-time values:
+P009 changes exactly three compile-time values:
 
 ```text
-SL_ZIGBEE_BROADCAST_TABLE_SIZE  30 -> 64
-SL_ZIGBEE_KEY_TABLE_SIZE         1 -> 12
+SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE 128 -> 512
+SL_ZIGBEE_BROADCAST_TABLE_SIZE         30 -> 64
+SL_ZIGBEE_KEY_TABLE_SIZE                1 -> 12
 ```
+
+The RX buffer increase follows the current Nabu Casa MG24/ZBT-2 production profile. It adds host-to-NCP transport burst headroom without changing the SONOFF Dongle-M hardware transport contract: EUSART1, 115200 baud, no hardware flow control. It is not treated as the root-cause fix for the observed `BUSY`; the broadcast-table increase remains the primary intervention.
 
 Retained MG24 large-network profile:
 
@@ -31,6 +34,15 @@ retry queue                                     16
 store-and-forward                                5
 ```
 
-Transport invariants: EUSART1, 115200 baud, no flow control. Do not change NVM/network identity.
+Transport contract:
+
+```text
+EUSART1
+115200 baud
+no hardware flow control
+RX buffer 512 bytes in P009 (stock rollback remains 128)
+```
+
+Do not copy ZBT-2-specific transport settings such as 460800 baud or its board-specific flow-control wiring onto the SONOFF Dongle-M. Do not change NVM/network identity.
 
 Optional host-side runtime policy is documented under `runtime/README.md`; firmware-only P009 with stock Z2M is tested first.
