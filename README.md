@@ -33,13 +33,15 @@ The build verifier fails unless these are the **only intended profile difference
 | APS unicast messages | 128 |
 | Discovery table | 16 |
 | Multicast table | 26 |
-| Neighbor table | 26 |
+| Neighbor table | **26 (Silicon Labs maximum)** |
 | Binding table | 32 |
 | Max end-device children | 64 |
 | APS duplicate-rejection entries | 64 |
 | Packet-buffer heap | HUGE |
 | Retry queue | 16 |
 | Store-and-forward | 5 |
+
+**Neighbor-table note:** this is already fully tuned. Silicon Labs supports neighbor-table sizes of 1, 16 or **26**, with 26 the maximum number of router neighbors the Ember stack can track. P009 therefore retains 26 rather than inventing an unsupported 27/32 setting. This is also the value used by Nabu Casa's current MG24 ZBT-2 profile. End-device children are tracked separately; route/source-route capacity is also separate and is already set to 254.
 
 Transport is also unchanged:
 
@@ -89,7 +91,13 @@ The upstream baseline used by this build has a key table of only **1** entry. P0
 
 This does not make Zigbee encryption “stronger”. It simply gives the coordinator more room for devices or features that require APS/link-key table entries.
 
-### 4. Everything else stays familiar
+### 4. Neighbor/routing capacity is already near the useful ceiling
+
+The coordinator's **neighbor table is already at Ember's hard maximum of 26 router neighbors**, so P009 does not try to enlarge it further. Likewise, the route and source-route tables are already 254 entries each. That means P009's resource tuning is aimed at the remaining demonstrated pressure point—broadcast admission—rather than changing already-maximized mesh-topology tables.
+
+A larger neighbor table would not increase radio range or make every router a direct neighbor; direct-neighbor quality still depends on RF placement and topology.
+
+### 5. Everything else stays familiar
 
 P009 does not attempt to solve unrelated Zigbee problems by changing many parameters at once. Keeping routing tables, source routing, UART transport, RF/network identity and retry behavior unchanged makes the result easier to attribute and easier to roll back.
 
