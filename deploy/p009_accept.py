@@ -7,16 +7,16 @@ import re
 import shlex
 
 from p009_common import *  # noqa: F403
-from p009_deploy import PHASE_AUTO, PHASE_IDENTITY, require_phase, save_session, stop_session
+from p009_deploy import PHASE_AUTO, PHASE_IDENTITY, require_phase, save_session, stop_session, validate_session_target
 
 
 def parse_json_output(text: str, label: str) -> dict[str, object]:
     try:
         doc = json.loads(text)
     except json.JSONDecodeError as exc:
-        die(f"{label} did not return JSON: {exc}")
+        raise RuntimeError(f"{label} did not return JSON: {exc}") from exc
     if not isinstance(doc, dict):
-        die(f"{label} output is not an object")
+        raise RuntimeError(f"{label} output is not an object")
     return doc
 
 
@@ -25,6 +25,7 @@ def cmd_acceptance(args: argparse.Namespace) -> None:
         die("acceptance requires --confirm P009-ACCEPT")
     session = load_json(args.session)
     require_phase(session, PHASE_IDENTITY)
+    validate_session_target(session, args)
     for path in (args.active_script, args.permit_script):
         if not path.is_file():
             die(f"acceptance script missing: {path}")
@@ -53,8 +54,8 @@ def cmd_acceptance(args: argparse.Namespace) -> None:
         if fatal:
             raise RuntimeError("fatal NCP/ASH signatures in acceptance window: " + " | ".join(fatal[-10:]))
     except Exception as exc:
-        stop_session(args.session, session, str(exc), args.host, args.addon, stop_addon=False)
-        die(f"acceptance STOP: {exc}")
+        stop_session(args.session, session, str(exc), args.host, args.addon, stop_addon=True)
+        die(f"acceptance STOP; Z2M stopped and session marked STOPPED: {exc}")
 
     session["acceptance"] = {"active": active, "permit": permit, "fatal_log_lines": fatal, "log_delta_exact": exact_delta}
     session["phase"] = PHASE_AUTO
