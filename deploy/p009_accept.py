@@ -32,12 +32,12 @@ def cmd_acceptance(args: argparse.Namespace) -> None:
 
     remote_active = f"{args.z2m_dir}/p009-acceptance-active.cjs"
     remote_permit = f"{args.z2m_dir}/p009-acceptance-permitjoin.cjs"
-    remote_write_text(args.host, remote_active, args.active_script.read_text(encoding="utf-8"))
-    remote_write_text(args.host, remote_permit, args.permit_script.read_text(encoding="utf-8"))
-
-    container = require_single_z2m_owner(args.host)
-    logs_before = addon_logs(args.host, args.addon)
     try:
+        remote_write_text(args.host, remote_active, args.active_script.read_text(encoding="utf-8"))
+        remote_write_text(args.host, remote_permit, args.permit_script.read_text(encoding="utf-8"))
+        container = require_single_z2m_owner(args.host)
+        logs_before = addon_logs(args.host, args.addon)
+
         out1 = remote_exec(args.host, f"docker exec {shlex.quote(container)} node {shlex.quote(remote_active)}")
         active = parse_json_output(out1, "active canary")
         if active.get("ok") is not True:
@@ -53,7 +53,7 @@ def cmd_acceptance(args: argparse.Namespace) -> None:
         fatal = [line for line in delta.splitlines() if re.search(r"NCP.*reset|ASH.*(error|reset)|adapter.*disconnected|NETWORK_DOWN", line, re.IGNORECASE)]
         if fatal:
             raise RuntimeError("fatal NCP/ASH signatures in acceptance window: " + " | ".join(fatal[-10:]))
-    except Exception as exc:
+    except BaseException as exc:
         stop_session(args.session, session, str(exc), args.host, args.addon, stop_addon=True)
         die(f"acceptance STOP; Z2M stopped and session marked STOPPED: {exc}")
 
