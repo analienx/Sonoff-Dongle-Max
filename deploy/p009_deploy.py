@@ -13,6 +13,7 @@ from p009_common import *  # noqa: F403
 
 PHASE_ARMING = "ARMING"
 PHASE_ARMED = "ARMED"
+PHASE_FLASH = "FLASH_CONFIRMED"
 PHASE_IDENTITY = "IDENTITY_VERIFIED"
 PHASE_AUTO = "AUTOMATED_ACCEPTANCE_PASSED"
 PHASE_ACCEPTED = "ACCEPTED"
@@ -27,12 +28,7 @@ def require_phase(session: dict[str, object], *expected: str) -> None:
 
 
 def validate_session_target(session: dict[str, object], args: argparse.Namespace) -> None:
-    expected = {
-        "host": args.host,
-        "addon": args.addon,
-        "z2m_dir": args.z2m_dir,
-        "remote_template": args.remote_template,
-    }
+    expected = {"host": args.host, "addon": args.addon, "z2m_dir": args.z2m_dir, "remote_template": args.remote_template}
     mismatches = [f"{k}: session={session.get(k)!r} cli={v!r}" for k, v in expected.items() if session.get(k) != v]
     if mismatches:
         die("CLI target/transport does not match armed session: " + "; ".join(mismatches))
@@ -108,27 +104,18 @@ def cmd_arm(args: argparse.Namespace) -> None:
     try:
         remote_exec(args.host, f"ha addons stop {shlex.quote(args.addon)}")
         wait_state(args.host, args.addon, {"stopped"})
-
         stopped_hashes = remote_hashes(args.host, args.z2m_dir)
         required_stopped = {"configuration.yaml", "database.db", "coordinator_backup.json"}
         if not required_stopped.issubset(stopped_hashes):
             raise RuntimeError(f"stopped-state file hashes incomplete: {stopped_hashes}")
-
         stamp = utcstamp()
         backup_dir = f"/config/p009-backups/{stamp}"
         tar_path = f"{backup_dir}/zigbee2mqtt.tgz"
         q = shlex.quote
-        remote = remote_exec(
-            args.host,
-            "set -eu; "
-            f"mkdir -p {q(backup_dir)}; "
-            f"tar -C /config -czf {q(tar_path)} zigbee2mqtt; "
-            f"sha256sum {q(tar_path)}",
-        ).strip()
+        remote = remote_exec(args.host, "set -eu; " f"mkdir -p {q(backup_dir)}; " f"tar -C /config -czf {q(tar_path)} zigbee2mqtt; " f"sha256sum {q(tar_path)}").strip()
         m = re.match(r"([0-9a-f]{64})\s+(.+)", remote)
         if not m:
             raise RuntimeError(f"could not verify stopped-state backup: {remote!r}")
-
         session["stopped_state_backup"] = {"remote_path": tar_path, "sha256": m.group(1), "file_sha256": stopped_hashes}
         session["phase"] = PHASE_ARMED
         save_session(args.session, session)
@@ -146,6 +133,24 @@ def cmd_arm(args: argparse.Namespace) -> None:
     print(f"Backup on HA:    {tar_path}")
     print(f"Backup SHA256:   {m.group(1)}")
     print("Zigbee2MQTT remains STOPPED. Flash only the exact P009 GBL above through the proven WebUI.")
+
+
+def cmd_confirm_flash(args: argparse.Namespace) -> None:
+    if args.confirm != "P009-FLASHED":
+        die("confirm-flash requires --confirm P009-FLASHED")
+    session = load_json(args.session)
+    require_phase(session, PHASE_ARMED)
+    validate_session_target(session, args)
+    expected = str((session.get("p009_gbl") or {}).get("sha256") or "").lower()
+    observed = args.observed_sha256.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", observed):
+        die("--observed-sha256 must be a 64-character SHA256")
+    if observed != expected:
+        die(f"flashed GBL hash acknowledgment mismatch: expected {expected}, got {observed}")
+    session["manual_flash"] = {"confirmed_utc": datetime.now(timezone.utc).isoformat(), "sha256": observed, "webui_note": args.webui_note.strip()[:500]}
+    session["phase"] = PHASE_FLASH
+    save_session(args.session, session)
+    print(f"P009: manual flash acknowledged for exact ARM-verified GBL -> phase={PHASE_FLASH}")
 
 
 def runtime_readbacks(lines: list[str]) -> dict[str, dict[str, object]]:
@@ -176,15 +181,13 @@ def cmd_postflash(args: argparse.Namespace) -> None:
     if args.confirm != "P009-POSTFLASH":
         die("postflash requires --confirm P009-POSTFLASH")
     session = load_json(args.session)
-    require_phase(session, PHASE_ARMED)
+    require_phase(session, PHASE_FLASH)
     validate_session_target(session, args)
-
     info = addon_info(args.host, args.addon)
     if addon_state(info) not in {"started", "running"}:
         remote_exec(args.host, f"ha addons start {shlex.quote(args.addon)}")
         wait_state(args.host, args.addon, {"started", "running"}, timeout=120)
     time.sleep(args.settle_seconds)
-
     try:
         post = snapshot(args.host, args.addon, args.z2m_dir)
         validate_identity(post["identity"])
@@ -203,7 +206,6 @@ def cmd_postflash(args: argparse.Namespace) -> None:
     except BaseException as exc:
         stop_session(args.session, session, str(exc), args.host, args.addon, stop_addon=True)
         die(f"post-flash gate failed; Z2M stopped and session marked STOPPED: {exc}")
-
     session["postflash"] = {"snapshot": post, "runtime_readbacks": readbacks, "runtime_required": args.require_runtime}
     session["phase"] = PHASE_IDENTITY
     save_session(args.session, session)
@@ -216,9 +218,20 @@ def cmd_finalize(args: argparse.Namespace) -> None:
         die("finalize requires --confirm P009-FINALIZE")
     session = load_json(args.session)
     require_phase(session, PHASE_AUTO)
+    validate_session_target(session, args)
     if len(args.group_evidence) != 2 or any(not x.strip() for x in args.group_evidence):
         die("finalize requires exactly two non-empty --group-evidence values")
-    session["group_command_evidence"] = args.group_evidence
+    try:
+        final_snapshot = snapshot(args.host, args.addon, args.z2m_dir)
+        validate_identity(final_snapshot["identity"])
+        diffs = compare_identity(session["pre"], final_snapshot)
+        if diffs:
+            raise RuntimeError("final identity changed: " + "; ".join(diffs))
+    except BaseException as exc:
+        stop_session(args.session, session, f"finalization safety gate failed: {exc}", args.host, args.addon, stop_addon=True)
+        die(f"finalize STOP; Z2M stopped and session marked STOPPED: {exc}")
+    session["group_command_evidence"] = [x.strip() for x in args.group_evidence]
+    session["final_snapshot"] = final_snapshot
     session["phase"] = PHASE_ACCEPTED
     session["accepted_utc"] = datetime.now(timezone.utc).isoformat()
     save_session(args.session, session)
@@ -243,15 +256,7 @@ def cmd_restore_data(args: argparse.Namespace) -> None:
         remote_exec(args.host, f"ha addons stop {shlex.quote(args.addon)}")
         wait_state(args.host, args.addon, {"stopped"})
         quarantine = f"/config/zigbee2mqtt.failed-p009-{utcstamp()}"
-        remote_exec(
-            args.host,
-            "set -eu; "
-            f"mv {q(args.z2m_dir)} {q(quarantine)}; "
-            f"tar -C /config -xzf {q(remote_path)}; "
-            f"test -f {q(args.z2m_dir + '/database.db')}; "
-            f"test -f {q(args.z2m_dir + '/configuration.yaml')}; "
-            f"test -f {q(args.z2m_dir + '/coordinator_backup.json')}",
-        )
+        remote_exec(args.host, "set -eu; " f"mv {q(args.z2m_dir)} {q(quarantine)}; " f"tar -C /config -xzf {q(remote_path)}; " f"test -f {q(args.z2m_dir + '/database.db')}; " f"test -f {q(args.z2m_dir + '/configuration.yaml')}; " f"test -f {q(args.z2m_dir + '/coordinator_backup.json')}")
         expected_files = backup.get("file_sha256") or {}
         restored_hashes = remote_hashes(args.host, args.z2m_dir)
         if expected_files and restored_hashes != expected_files:
@@ -265,7 +270,6 @@ def cmd_restore_data(args: argparse.Namespace) -> None:
         save_session(args.session, session)
         print("P009: data restore STOPPED; review HA/Z2M filesystem and add-on state before further action.", file=__import__("sys").stderr)
         raise
-
     session["data_restore"] = {"utc": datetime.now(timezone.utc).isoformat(), "quarantine": quarantine}
     session["phase"] = PHASE_ROLLED_BACK_DATA
     save_session(args.session, session)
@@ -277,7 +281,8 @@ def cmd_status(args: argparse.Namespace) -> None:
     phase = session.get("phase")
     next_step = {
         PHASE_ARMING: "Interrupted/in-progress ARM state. Do not continue until reviewed.",
-        PHASE_ARMED: "Flash exact P009 GBL via WebUI, then run postflash.",
+        PHASE_ARMED: "Flash exact P009 GBL via WebUI, then confirm-flash with its exact SHA256.",
+        PHASE_FLASH: "Run postflash identity gate.",
         PHASE_IDENTITY: "Run bounded acceptance.",
         PHASE_AUTO: "Run exactly two representative group commands, then finalize with two evidence strings.",
         PHASE_ACCEPTED: "Done. Stop testing.",
@@ -301,6 +306,7 @@ def cmd_report(args: argparse.Namespace) -> None:
     print(f"PHASE: {s.get('phase')}")
     print(f"P009 GBL: {p.get('name')} | {p.get('bytes')} | {p.get('sha256')}")
     print(f"STOCK GBL: {st.get('name')} | {st.get('bytes')} | {st.get('sha256')}")
+    print(f"MANUAL FLASH ACK: {'YES' if s.get('manual_flash') else 'NO'}")
     print(f"POSTFLASH IDENTITY: {'PASS' if s.get('postflash') else 'NOT RUN'}")
     print(f"ACTIVE CANARY: {can.get('successes', 0)}/{can.get('total', 16)}")
     print(f"PERMIT JOIN ALL: {permit_ok}/{len(results) or 5} OK | BUSY={busy}")
