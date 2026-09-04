@@ -1,0 +1,136 @@
+name: Build P009 MG24 firmware
+
+on:
+  push:
+    branches: [p009-mg24-broadcast-headroom]
+    paths:
+      - ".github/workflows/build-p009.yml"
+      - "firmware/**"
+      - "runtime/**"
+      - "deploy/**"
+      - "tests/**"
+      - "docs/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  firmware:
+    name: Build and verify P009 + stock rollback NCP
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+      - name: Validate repo tooling
+        run: |
+          set -euo pipefail
+          python3 -m py_compile repo/firmware/*.py repo/runtime/*.py repo/deploy/*.py repo/tests/test_p009.py
+          node --check repo/deploy/acceptance-active.cjs
+          node --check repo/deploy/acceptance-permitjoin.cjs
+          PYTHONPATH=repo/deploy python3 repo/tests/test_p009.py
+          PYTHONPATH=repo/deploy python3 repo/deploy/p009_tool.py --help >/dev/null
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Nerivec/silabs-firmware-builder
+          ref: 858c34b0eb6f53a2e0c89455ea489ceaa62d58db
+          path: builder-stock
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Nerivec/silabs-firmware-builder
+          ref: 858c34b0eb6f53a2e0c89455ea489ceaa62d58db
+          path: builder-p009
+      - name: Verify and patch source
+        run: |
+          set -euo pipefail
+          test "$(git -C builder-stock rev-parse HEAD)" = "858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
+          test "$(git -C builder-p009 rev-parse HEAD)" = "858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
+          python3 repo/firmware/patch_builder.py builder-p009
+          git -C builder-p009 diff --check
+      - name: Build pinned Silicon Labs toolchain container
+        run: |
+          set -euo pipefail
+          docker build --pull -t p009-silabs-builder:9.1.1 builder-stock
+          {
+            echo "builder_commit=858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
+            echo "docker_image_id=$(docker image inspect --format '{{.Id}}' p009-silabs-builder:9.1.1)"
+            docker run --rm --entrypoint /opt/venv/bin/python3 p009-silabs-builder:9.1.1 -c 'import platform, importlib.metadata as m; print("python="+platform.python_version()); print("ruamel.yaml="+m.version("ruamel.yaml"))'
+          } | tee P009-TOOLCHAIN-EVIDENCE.txt
+      - name: Compile stock rollback
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$GITHUB_WORKSPACE/builder-stock:/repo" -w /repo p009-silabs-builder:9.1.1 \
+            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --output-dir outputs \
+            --output gbl --output hex --output out --repo-owner analienx --repo-hash stock911
+      - name: Compile P009
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$GITHUB_WORKSPACE/builder-p009:/repo" -w /repo p009-silabs-builder:9.1.1 \
+            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --output-dir outputs \
+            --output gbl --output hex --output out --repo-owner analienx --repo-hash p009b64
+      - name: Assemble and verify bundle
+        run: |
+          set -euo pipefail
+          mkdir -p bundle/p009 bundle/rollback-stock bundle/effective
+          cp builder-p009/outputs/* bundle/p009/
+          cp builder-stock/outputs/* bundle/rollback-stock/
+          cp builder-p009/src/zigbee_ncp/zigbee_ncp.slcp bundle/effective/P009-effective-zigbee_ncp.slcp
+          cp builder-stock/src/zigbee_ncp/zigbee_ncp.slcp bundle/effective/STOCK-effective-zigbee_ncp.slcp
+          cp builder-p009/manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml bundle/effective/sonoff_dongle-m_zigbee_ncp.yaml
+          cp repo/firmware/RESOURCE-PROFILE.md bundle/RESOURCE-PROFILE.md
+          cp P009-TOOLCHAIN-EVIDENCE.txt bundle/P009-TOOLCHAIN-EVIDENCE.txt
+          python3 repo/firmware/verify_build.py \
+            --p009-dir bundle/p009 --stock-dir bundle/rollback-stock \
+            --p009-slcp bundle/effective/P009-effective-zigbee_ncp.slcp \
+            --stock-slcp bundle/effective/STOCK-effective-zigbee_ncp.slcp \
+            --manifest bundle/effective/sonoff_dongle-m_zigbee_ncp.yaml \
+            --output bundle/P009-BUILD-MANIFEST.json
+          (cd bundle && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS && sha256sum -c SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonoff-dongle-max-p009-9.1.1
+          path: bundle/*
+          compression-level: 9
+          if-no-files-found: error
+
+  runtime:
+    name: Build optional pinned herdsman runtime overlay
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Koenkk/zigbee-herdsman
+          ref: 0968f979d558874b17396c96b66382d4236bbdcd
+          path: herdsman
+      - name: Apply and build runtime policy
+        run: |
+          set -euo pipefail
+          test "$(git -C herdsman rev-parse HEAD)" = "0968f979d558874b17396c96b66382d4236bbdcd"
+          python3 repo/runtime/patch_herdsman.py herdsman
+          git -C herdsman diff --check
+          cd herdsman
+          corepack enable
+          corepack prepare pnpm@10.33.0 --activate
+          pnpm install --frozen-lockfile
+          pnpm run build
+          grep -F "[P009 EZSP]" dist/adapter/ember/adapter/emberAdapter.js
+      - name: Package runtime overlay
+        run: |
+          set -euo pipefail
+          mkdir -p runtime-bundle
+          cp herdsman/dist/adapter/ember/adapter/emberAdapter.js runtime-bundle/
+          git -C herdsman diff --binary > runtime-bundle/zigbee-herdsman-10.9.1-p009.patch
+          cp repo/runtime/README.md runtime-bundle/README.md
+          (cd runtime-bundle && sha256sum emberAdapter.js zigbee-herdsman-10.9.1-p009.patch README.md > SHA256SUMS && sha256sum -c SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonoff-dongle-max-herdsman-p009-10.9.1
+          path: runtime-bundle/*
+          compression-level: 9
+          if-no-files-found: error
