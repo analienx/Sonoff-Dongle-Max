@@ -32,10 +32,17 @@ def main() -> None:
 
     original = slcp.read_text(encoding="utf-8")
     text = original
+    text = replace_once(
+        text,
+        "  - name: SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE\n    value: 128\n    condition:\n      - iostream_eusart\n",
+        "  - name: SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE\n    value: 512\n    condition:\n      - iostream_eusart\n",
+        "EUSART RX buffer",
+    )
     text = replace_once(text, "  - name: SL_ZIGBEE_BROADCAST_TABLE_SIZE\n    value: 30\n", "  - name: SL_ZIGBEE_BROADCAST_TABLE_SIZE\n    value: 64\n", "broadcast table")
     text = replace_once(text, "  - name: SL_ZIGBEE_KEY_TABLE_SIZE\n    value: 1\n", "  - name: SL_ZIGBEE_KEY_TABLE_SIZE\n    value: 12\n", "key table")
 
     invariants = {
+        "EUSART RX buffer=512": r"- name: SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE\n\s+value: 512\n\s+condition:\n\s+- iostream_eusart",
         "multicast=26": r"- name: SL_ZIGBEE_MULTICAST_TABLE_SIZE\n\s+value: 26",
         "discovery xg24=16": r"- name: SL_ZIGBEE_DISCOVERY_TABLE_SIZE\n\s+value: 16\n\s+condition: \[\"device_generic_family_efr32xg24\"\]",
         "neighbor=26": r"- name: SL_ZIGBEE_NEIGHBOR_TABLE_SIZE\n\s+value: 26",
@@ -67,8 +74,9 @@ def main() -> None:
         raise SystemExit("patch produced no change")
     slcp.write_text(text, encoding="utf-8")
     print("P009 profile applied successfully")
-    print("  broadcast table: 30 -> 64")
-    print("  key table:        1 -> 12")
+    print("  EUSART RX buffer: 128 -> 512")
+    print("  broadcast table:  30 -> 64")
+    print("  key table:         1 -> 12")
     print("  all other MG24 resource/transport invariants verified")
 
 
