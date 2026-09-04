@@ -5,14 +5,16 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
 if str(DEPLOY) not in sys.path:
     sys.path.insert(0, str(DEPLOY))
 
+from p009_accept import parse_json_output
 from p009_common import appended_logs, compare_identity, configure_remote, remote_argv, safe_identity_from_backup_doc
-from p009_deploy import PHASE_ARMED, PHASE_IDENTITY, require_phase, runtime_readbacks
+from p009_deploy import PHASE_ARMED, PHASE_IDENTITY, require_phase, runtime_readbacks, validate_session_target
 
 
 class P009Tests(unittest.TestCase):
@@ -68,9 +70,13 @@ class P009Tests(unittest.TestCase):
         lines = [f"[P009 EZSP] {k} expected={v} actual={v} readStatus=OK" for k, v in values.items()]
         self.assertEqual(set(runtime_readbacks(lines)), set(values))
 
-    def test_runtime_readback_rejects_mismatch(self):
-        with self.assertRaises(SystemExit):
+    def test_runtime_readback_rejects_mismatch_with_normal_exception(self):
+        with self.assertRaises(RuntimeError):
             runtime_readbacks(["[P009 EZSP] BROADCAST_TABLE_SIZE expected=64 actual=30 readStatus=OK"])
+
+    def test_acceptance_bad_json_uses_normal_exception(self):
+        with self.assertRaises(RuntimeError):
+            parse_json_output("not-json", "canary")
 
     def test_identity_compare_detects_drift(self):
         base = {"identity": {"coordinator_ieee": "aa", "pan_id": "bb", "extended_pan_id": "cc", "channel": 11, "network_key_sha256": "dd", "network_key_sequence_number": 0, "device_backup_entries": 104}}
@@ -84,6 +90,14 @@ class P009Tests(unittest.TestCase):
         require_phase({"phase": PHASE_ARMED}, PHASE_ARMED)
         with self.assertRaises(SystemExit):
             require_phase({"phase": PHASE_ARMED}, PHASE_IDENTITY)
+
+    def test_session_target_lock(self):
+        session = {"host": "ha", "addon": "z2m", "z2m_dir": "/config/zigbee2mqtt", "remote_template": "rtk proxy ssh {host} {command}"}
+        args = SimpleNamespace(host="ha", addon="z2m", z2m_dir="/config/zigbee2mqtt", remote_template="rtk proxy ssh {host} {command}")
+        validate_session_target(session, args)
+        args.host = "other"
+        with self.assertRaises(SystemExit):
+            validate_session_target(session, args)
 
 
 if __name__ == "__main__":
