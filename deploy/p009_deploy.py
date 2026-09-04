@@ -48,8 +48,8 @@ def stop_session(path: Path, session: dict[str, object], reason: str, host: str,
         try:
             remote_exec(host, f"ha addons stop {shlex.quote(addon)}")
             wait_state(host, addon, {"stopped"})
-        except Exception as exc:
-            reason += f"; additionally failed to stop add-on: {exc}"
+        except BaseException as exc:
+            reason += f"; additionally failed to confirm add-on stopped: {exc}"
     session["phase"] = PHASE_STOPPED
     session["stop_reason"] = reason
     save_session(path, session)
@@ -200,7 +200,7 @@ def cmd_postflash(args: argparse.Namespace) -> None:
         required = {"BROADCAST_TABLE_SIZE", "NEW_BROADCAST_ENTRY_THRESHOLD", "RETRY_QUEUE_SIZE", "MTORR_FLOW_CONTROL", "SUPPORTED_NETWORKS", "SEND_MULTICASTS_TO_SLEEPY_ADDRESS"}
         if args.require_runtime and set(readbacks) != required:
             raise RuntimeError(f"runtime overlay required but complete six-value readback was not found: {sorted(readbacks)}")
-    except Exception as exc:
+    except BaseException as exc:
         stop_session(args.session, session, str(exc), args.host, args.addon, stop_addon=True)
         die(f"post-flash gate failed; Z2M stopped and session marked STOPPED: {exc}")
 
@@ -236,28 +236,36 @@ def cmd_restore_data(args: argparse.Namespace) -> None:
     if not isinstance(remote_path, str) or not re.fullmatch(r"[0-9a-f]{64}", str(expected_hash)):
         die("invalid stopped-state backup metadata")
     q = shlex.quote
-    actual = remote_exec(args.host, f"sha256sum {q(remote_path)}").split()[0]
-    if actual != expected_hash:
-        die(f"remote rollback backup hash mismatch: {actual}")
-    remote_exec(args.host, f"ha addons stop {shlex.quote(args.addon)}")
-    wait_state(args.host, args.addon, {"stopped"})
-    quarantine = f"/config/zigbee2mqtt.failed-p009-{utcstamp()}"
-    remote_exec(
-        args.host,
-        "set -eu; "
-        f"mv {q(args.z2m_dir)} {q(quarantine)}; "
-        f"tar -C /config -xzf {q(remote_path)}; "
-        f"test -f {q(args.z2m_dir + '/database.db')}; "
-        f"test -f {q(args.z2m_dir + '/configuration.yaml')}; "
-        f"test -f {q(args.z2m_dir + '/coordinator_backup.json')}",
-    )
-    expected_files = backup.get("file_sha256") or {}
-    restored_hashes = remote_hashes(args.host, args.z2m_dir)
-    if expected_files and restored_hashes != expected_files:
-        die(f"restored stopped-state hashes differ: expected={expected_files} actual={restored_hashes}")
-    remote_exec(args.host, f"ha addons start {shlex.quote(args.addon)}")
-    wait_state(args.host, args.addon, {"started", "running"}, timeout=120)
-    require_single_z2m_owner(args.host)
+    try:
+        actual = remote_exec(args.host, f"sha256sum {q(remote_path)}").split()[0]
+        if actual != expected_hash:
+            raise RuntimeError(f"remote rollback backup hash mismatch: {actual}")
+        remote_exec(args.host, f"ha addons stop {shlex.quote(args.addon)}")
+        wait_state(args.host, args.addon, {"stopped"})
+        quarantine = f"/config/zigbee2mqtt.failed-p009-{utcstamp()}"
+        remote_exec(
+            args.host,
+            "set -eu; "
+            f"mv {q(args.z2m_dir)} {q(quarantine)}; "
+            f"tar -C /config -xzf {q(remote_path)}; "
+            f"test -f {q(args.z2m_dir + '/database.db')}; "
+            f"test -f {q(args.z2m_dir + '/configuration.yaml')}; "
+            f"test -f {q(args.z2m_dir + '/coordinator_backup.json')}",
+        )
+        expected_files = backup.get("file_sha256") or {}
+        restored_hashes = remote_hashes(args.host, args.z2m_dir)
+        if expected_files and restored_hashes != expected_files:
+            raise RuntimeError(f"restored stopped-state hashes differ: expected={expected_files} actual={restored_hashes}")
+        remote_exec(args.host, f"ha addons start {shlex.quote(args.addon)}")
+        wait_state(args.host, args.addon, {"started", "running"}, timeout=120)
+        require_single_z2m_owner(args.host)
+    except BaseException as exc:
+        session["phase"] = PHASE_STOPPED
+        session["stop_reason"] = f"data restore failed/interrupted: {exc}"
+        save_session(args.session, session)
+        print("P009: data restore STOPPED; review HA/Z2M filesystem and add-on state before further action.", file=__import__("sys").stderr)
+        raise
+
     session["data_restore"] = {"utc": datetime.now(timezone.utc).isoformat(), "quarantine": quarantine}
     session["phase"] = PHASE_ROLLED_BACK_DATA
     save_session(args.session, session)
