@@ -25,8 +25,16 @@ COMMON_PROFILE = {
     "SL_ZIGBEE_MAX_END_DEVICE_CHILDREN": 64,
     "SL_ZIGBEE_APS_DUPLICATE_REJECTION_MAX_ENTRIES": 64,
 }
-P009_ONLY = {"SL_ZIGBEE_BROADCAST_TABLE_SIZE": 64, "SL_ZIGBEE_KEY_TABLE_SIZE": 12}
-STOCK_ONLY = {"SL_ZIGBEE_BROADCAST_TABLE_SIZE": 30, "SL_ZIGBEE_KEY_TABLE_SIZE": 1}
+P009_ONLY = {
+    "SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE": 512,
+    "SL_ZIGBEE_BROADCAST_TABLE_SIZE": 64,
+    "SL_ZIGBEE_KEY_TABLE_SIZE": 12,
+}
+STOCK_ONLY = {
+    "SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE": 128,
+    "SL_ZIGBEE_BROADCAST_TABLE_SIZE": 30,
+    "SL_ZIGBEE_KEY_TABLE_SIZE": 1,
+}
 
 
 def die(message: str) -> None:
@@ -61,12 +69,27 @@ def extract_value(text: str, name: str, xg24: bool = False) -> int:
     return int(matches[0])
 
 
+def extract_eusart_rx_buffer(text: str) -> int:
+    pat = r"- name: SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE\s*\n\s+value: ([0-9]+)\s*\n\s+condition:\s*\n\s+- iostream_eusart"
+    matches = re.findall(pat, text)
+    if len(matches) != 1:
+        die(f"SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE: expected one EUSART value, got {matches}")
+    return int(matches[0])
+
+
 def profile(slcp: Path) -> dict[str, int | str]:
     text = slcp.read_text(encoding="utf-8")
     out: dict[str, int | str] = {}
-    global_names = {"SL_ZIGBEE_MULTICAST_TABLE_SIZE", "SL_ZIGBEE_NEIGHBOR_TABLE_SIZE", "SL_ZIGBEE_BINDING_TABLE_SIZE", "SL_ZIGBEE_BROADCAST_TABLE_SIZE", "SL_ZIGBEE_KEY_TABLE_SIZE"}
-    for name in COMMON_PROFILE | P009_ONLY:
+    global_names = {
+        "SL_ZIGBEE_MULTICAST_TABLE_SIZE",
+        "SL_ZIGBEE_NEIGHBOR_TABLE_SIZE",
+        "SL_ZIGBEE_BINDING_TABLE_SIZE",
+        "SL_ZIGBEE_BROADCAST_TABLE_SIZE",
+        "SL_ZIGBEE_KEY_TABLE_SIZE",
+    }
+    for name in COMMON_PROFILE | {"SL_ZIGBEE_BROADCAST_TABLE_SIZE", "SL_ZIGBEE_KEY_TABLE_SIZE"}:
         out[name] = extract_value(text, name, xg24=name not in global_names)
+    out["SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE"] = extract_eusart_rx_buffer(text)
     heap_pat = r"- name: SL_ZIGBEE_PACKET_BUFFER_HEAP_SIZE\s*\n\s+value: (SL_ZIGBEE_HUGE_PACKET_BUFFER_HEAP)\s*\n\s+condition: \[\"device_generic_family_efr32xg24\"\]"
     m = re.findall(heap_pat, text)
     if m != ["SL_ZIGBEE_HUGE_PACKET_BUFFER_HEAP"]:
@@ -117,7 +140,11 @@ def main() -> None:
     validate_profile(p_profile, P009_ONLY)
     validate_profile(s_profile, STOCK_ONLY)
     changed = {k for k in p_profile if p_profile[k] != s_profile[k]}
-    allowed = {"SL_ZIGBEE_BROADCAST_TABLE_SIZE", "SL_ZIGBEE_KEY_TABLE_SIZE"}
+    allowed = {
+        "SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE",
+        "SL_ZIGBEE_BROADCAST_TABLE_SIZE",
+        "SL_ZIGBEE_KEY_TABLE_SIZE",
+    }
     if changed != allowed:
         die(f"P009 vs stock resource differences must be exactly {sorted(allowed)}, got {sorted(changed)}")
 
