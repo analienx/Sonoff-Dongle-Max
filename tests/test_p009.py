@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ if str(DEPLOY) not in sys.path:
 
 from p009_accept import parse_json_output
 from p009_common import appended_logs, compare_identity, configure_remote, remote_argv, safe_identity_from_backup_doc
-from p009_deploy import PHASE_ARMED, PHASE_IDENTITY, require_phase, runtime_readbacks, validate_session_target
+from p009_deploy import PHASE_ARMED, PHASE_FLASH, PHASE_IDENTITY, cmd_confirm_flash, require_phase, runtime_readbacks, validate_session_target
 
 
 class P009Tests(unittest.TestCase):
@@ -98,6 +99,26 @@ class P009Tests(unittest.TestCase):
         args.host = "other"
         with self.assertRaises(SystemExit):
             validate_session_target(session, args)
+
+    def test_manual_flash_gate_requires_exact_armed_hash(self):
+        digest = "ab" * 32
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "session.json"
+            path.write_text(json.dumps({
+                "phase": PHASE_ARMED,
+                "host": "ha",
+                "addon": "z2m",
+                "z2m_dir": "/config/zigbee2mqtt",
+                "remote_template": "ssh {host} {command}",
+                "p009_gbl": {"sha256": digest},
+            }), encoding="utf-8")
+            args = SimpleNamespace(
+                confirm="P009-FLASHED", session=path, observed_sha256=digest,
+                webui_note="success", host="ha", addon="z2m", z2m_dir="/config/zigbee2mqtt",
+                remote_template="ssh {host} {command}",
+            )
+            cmd_confirm_flash(args)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["phase"], PHASE_FLASH)
 
 
 if __name__ == "__main__":
