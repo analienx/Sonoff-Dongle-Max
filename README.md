@@ -29,17 +29,18 @@ Development is staged on `p009-staging`. The build workflow is deliberately trig
 - Verify the complete artifact checksum manifest before ARM.
 - Hash the network key on the HA host; never copy the plaintext key into deployment evidence.
 - ARM creates and hashes a stopped-state Z2M backup and leaves Z2M stopped for the manual WebUI flash.
+- A separate `FLASH_CONFIRMED` phase requires the exact ARM-verified P009 GBL SHA256 before post-flash testing can start.
 - All live post-ARM commands are locked to the exact host, add-on, Z2M path and remote transport stored in the session.
-- Identity or acceptance failure marks the session `STOPPED`; post-flash/acceptance safety failures stop Z2M.
+- Identity, acceptance or finalization failure marks the session `STOPPED`; safety failures stop Z2M.
 - Run only the bounded acceptance gate; no soak or parameter matrix.
 
 ## Deployment phases
 
 ```text
-ARMING -> ARMED -> IDENTITY_VERIFIED -> AUTOMATED_ACCEPTANCE_PASSED -> ACCEPTED
-                \-> STOPPED on a failed safety gate
+ARMING -> ARMED -> FLASH_CONFIRMED -> IDENTITY_VERIFIED -> AUTOMATED_ACCEPTANCE_PASSED -> ACCEPTED
+                \-------------------------------> STOPPED on a failed/interrupted safety gate
 ```
 
-The CLI does **not** flash firmware. The only firmware mutation remains one manually gated upload of the exact ARM-verified P009 GBL through the already-proven SONOFF WebUI.
+The CLI does **not** flash firmware. The only firmware mutation remains one manually gated upload of the exact ARM-verified P009 GBL through the already-proven SONOFF WebUI. Because P009 intentionally retains the 9.1.1 version string, `FLASH_CONFIRMED` is an explicit human acknowledgment of the exact uploaded GBL hash; it is not presented as a device-side binary attestation.
 
 See `docs/EXECUTOR-DEPLOY.md` before deployment.
