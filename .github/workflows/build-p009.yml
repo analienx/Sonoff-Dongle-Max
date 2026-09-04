@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: p009-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   firmware:
     name: Build and verify P009 + stock rollback NCP
@@ -87,12 +91,38 @@ jobs:
             --stock-slcp bundle/effective/STOCK-effective-zigbee_ncp.slcp \
             --manifest bundle/effective/sonoff_dongle-m_zigbee_ncp.yaml \
             --output bundle/P009-BUILD-MANIFEST.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          d = json.loads(Path("bundle/P009-BUILD-MANIFEST.json").read_text())
+          p = d["p009"]["artifacts"]["gbl"]
+          s = d["rollback_stock"]["artifacts"]["gbl"]
+          text = (
+              "P009 SONOFF Dongle-M / Dongle Max firmware bundle\n\n"
+              f"P009 GBL: {p['name']}\nP009 bytes: {p['bytes']}\nP009 SHA256: {p['sha256']}\n\n"
+              f"STOCK rollback GBL: {s['name']}\nSTOCK bytes: {s['bytes']}\nSTOCK SHA256: {s['sha256']}\n\n"
+              "Flash is NOT authorized by this file alone. Run deploy/p009_tool.py arm first.\n"
+          )
+          Path("bundle/P009-DEPLOY.txt").write_text(text)
+          PY
           (cd bundle && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS && sha256sum -c SHA256SUMS)
+      - name: Publish firmware summary
+        run: |
+          set -euo pipefail
+          {
+            echo "## P009 firmware bundle"
+            echo
+            jq -r '"- **P009:** `\(.p009.artifacts.gbl.name)` — \(.p009.artifacts.gbl.bytes) bytes — `\(.p009.artifacts.gbl.sha256)`"' bundle/P009-BUILD-MANIFEST.json
+            jq -r '"- **Stock rollback:** `\(.rollback_stock.artifacts.gbl.name)` — \(.rollback_stock.artifacts.gbl.bytes) bytes — `\(.rollback_stock.artifacts.gbl.sha256)`"' bundle/P009-BUILD-MANIFEST.json
+            echo
+            echo "Both were built from the same builder checkout/toolchain container. Verify the downloaded artifact with SHA256SUMS before ARM."
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sonoff-dongle-max-p009-9.1.1
-          path: bundle/*
+          path: bundle/
           compression-level: 9
+          retention-days: 30
           if-no-files-found: error
 
   runtime:
@@ -131,6 +161,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sonoff-dongle-max-herdsman-p009-10.9.1
-          path: runtime-bundle/*
+          path: runtime-bundle/
           compression-level: 9
+          retention-days: 30
           if-no-files-found: error
