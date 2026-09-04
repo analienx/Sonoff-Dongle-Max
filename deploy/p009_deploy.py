@@ -11,17 +11,31 @@ from pathlib import Path
 
 from p009_common import *  # noqa: F403
 
+PHASE_ARMING = "ARMING"
 PHASE_ARMED = "ARMED"
 PHASE_IDENTITY = "IDENTITY_VERIFIED"
 PHASE_AUTO = "AUTOMATED_ACCEPTANCE_PASSED"
 PHASE_ACCEPTED = "ACCEPTED"
 PHASE_STOPPED = "STOPPED"
+PHASE_ROLLED_BACK_DATA = "ROLLED_BACK_DATA"
 
 
 def require_phase(session: dict[str, object], *expected: str) -> None:
     phase = session.get("phase")
     if phase not in expected:
         die(f"session phase must be one of {expected}, got {phase!r}")
+
+
+def validate_session_target(session: dict[str, object], args: argparse.Namespace) -> None:
+    expected = {
+        "host": args.host,
+        "addon": args.addon,
+        "z2m_dir": args.z2m_dir,
+        "remote_template": args.remote_template,
+    }
+    mismatches = [f"{k}: session={session.get(k)!r} cli={v!r}" for k, v in expected.items() if session.get(k) != v]
+    if mismatches:
+        die("CLI target/transport does not match armed session: " + "; ".join(mismatches))
 
 
 def save_session(path: Path, session: dict[str, object]) -> None:
@@ -72,34 +86,9 @@ def cmd_arm(args: argparse.Namespace) -> None:
         die(f"expected active stock Z2M before arm, got state={state}")
     owner = require_single_z2m_owner(args.host)
 
-    print(f"P009: single Z2M owner confirmed: {owner}")
-    print("P009: stopping Zigbee2MQTT for stopped-state backup...")
-    remote_exec(args.host, f"ha addons stop {shlex.quote(args.addon)}")
-    wait_state(args.host, args.addon, {"stopped"})
-
-    stopped_hashes = remote_hashes(args.host, args.z2m_dir)
-    required_stopped = {"configuration.yaml", "database.db", "coordinator_backup.json"}
-    if not required_stopped.issubset(stopped_hashes):
-        die(f"stopped-state file hashes incomplete: {stopped_hashes}")
-
-    stamp = utcstamp()
-    backup_dir = f"/config/p009-backups/{stamp}"
-    tar_path = f"{backup_dir}/zigbee2mqtt.tgz"
-    q = shlex.quote
-    remote = remote_exec(
-        args.host,
-        "set -eu; "
-        f"mkdir -p {q(backup_dir)}; "
-        f"tar -C /config -czf {q(tar_path)} zigbee2mqtt; "
-        f"sha256sum {q(tar_path)}",
-    ).strip()
-    m = re.match(r"([0-9a-f]{64})\s+(.+)", remote)
-    if not m:
-        die(f"could not verify stopped-state backup: {remote!r}")
-
     session = {
         "schema": 2,
-        "phase": PHASE_ARMED,
+        "phase": PHASE_ARMING,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "repo_commit": repo_commit(),
         "host": args.host,
@@ -108,12 +97,48 @@ def cmd_arm(args: argparse.Namespace) -> None:
         "remote_template": args.remote_template,
         "pre": pre,
         "single_z2m_owner_pre_arm": owner,
-        "stopped_state_backup": {"remote_path": tar_path, "sha256": m.group(1), "file_sha256": stopped_hashes},
         "p009_gbl": {"path": str(p009_gbl.resolve()), "name": p009_gbl.name, "bytes": p009_gbl.stat().st_size, "sha256": sha256_file(p009_gbl)},
         "rollback_stock_gbl": {"path": str(stock_gbl.resolve()), "name": stock_gbl.name, "bytes": stock_gbl.stat().st_size, "sha256": sha256_file(stock_gbl)},
         "build_manifest": str(args.build_manifest.resolve()),
     }
     save_session(args.session, session)
+
+    print(f"P009: single Z2M owner confirmed: {owner}")
+    print("P009: stopping Zigbee2MQTT for stopped-state backup...")
+    try:
+        remote_exec(args.host, f"ha addons stop {shlex.quote(args.addon)}")
+        wait_state(args.host, args.addon, {"stopped"})
+
+        stopped_hashes = remote_hashes(args.host, args.z2m_dir)
+        required_stopped = {"configuration.yaml", "database.db", "coordinator_backup.json"}
+        if not required_stopped.issubset(stopped_hashes):
+            raise RuntimeError(f"stopped-state file hashes incomplete: {stopped_hashes}")
+
+        stamp = utcstamp()
+        backup_dir = f"/config/p009-backups/{stamp}"
+        tar_path = f"{backup_dir}/zigbee2mqtt.tgz"
+        q = shlex.quote
+        remote = remote_exec(
+            args.host,
+            "set -eu; "
+            f"mkdir -p {q(backup_dir)}; "
+            f"tar -C /config -czf {q(tar_path)} zigbee2mqtt; "
+            f"sha256sum {q(tar_path)}",
+        ).strip()
+        m = re.match(r"([0-9a-f]{64})\s+(.+)", remote)
+        if not m:
+            raise RuntimeError(f"could not verify stopped-state backup: {remote!r}")
+
+        session["stopped_state_backup"] = {"remote_path": tar_path, "sha256": m.group(1), "file_sha256": stopped_hashes}
+        session["phase"] = PHASE_ARMED
+        save_session(args.session, session)
+    except BaseException as exc:
+        session["phase"] = PHASE_STOPPED
+        session["stop_reason"] = f"ARM interrupted/failed after session creation: {exc}"
+        save_session(args.session, session)
+        print(f"P009: ARM STOPPED -> {args.session}; Zigbee2MQTT state must be reviewed before continuing.", file=__import__("sys").stderr)
+        raise
+
     print(f"P009: ARM PASS -> {args.session}")
     print(f"P009 GBL:        {p009_gbl}")
     print(f"P009 SHA256:     {session['p009_gbl']['sha256']}")
@@ -143,7 +168,7 @@ def runtime_readbacks(lines: list[str]) -> dict[str, dict[str, object]]:
     for name, value in expected.items():
         rec = out.get(name)
         if rec and (rec["expected"] != value or rec["actual"] != value or rec["read_status"] != "OK"):
-            die(f"bad P009 EZSP readback for {name}: {rec}")
+            raise RuntimeError(f"bad P009 EZSP readback for {name}: {rec}")
     return out
 
 
@@ -152,8 +177,7 @@ def cmd_postflash(args: argparse.Namespace) -> None:
         die("postflash requires --confirm P009-POSTFLASH")
     session = load_json(args.session)
     require_phase(session, PHASE_ARMED)
-    if session.get("host") != args.host or session.get("addon") != args.addon or session.get("z2m_dir") != args.z2m_dir:
-        die("CLI host/addon/z2m-dir do not match the armed session")
+    validate_session_target(session, args)
 
     info = addon_info(args.host, args.addon)
     if addon_state(info) not in {"started", "running"}:
@@ -205,6 +229,7 @@ def cmd_restore_data(args: argparse.Namespace) -> None:
     if args.confirm != "P009-RESTORE-DATA":
         die("restore-data requires --confirm P009-RESTORE-DATA")
     session = load_json(args.session)
+    validate_session_target(session, args)
     backup = session.get("stopped_state_backup") or {}
     remote_path = backup.get("remote_path")
     expected_hash = backup.get("sha256")
@@ -217,7 +242,15 @@ def cmd_restore_data(args: argparse.Namespace) -> None:
     remote_exec(args.host, f"ha addons stop {shlex.quote(args.addon)}")
     wait_state(args.host, args.addon, {"stopped"})
     quarantine = f"/config/zigbee2mqtt.failed-p009-{utcstamp()}"
-    remote_exec(args.host, "set -eu; " f"mv {q(args.z2m_dir)} {q(quarantine)}; " f"tar -C /config -xzf {q(remote_path)}; " f"test -f {q(args.z2m_dir + '/database.db')}; " f"test -f {q(args.z2m_dir + '/configuration.yaml')}; " f"test -f {q(args.z2m_dir + '/coordinator_backup.json')}")
+    remote_exec(
+        args.host,
+        "set -eu; "
+        f"mv {q(args.z2m_dir)} {q(quarantine)}; "
+        f"tar -C /config -xzf {q(remote_path)}; "
+        f"test -f {q(args.z2m_dir + '/database.db')}; "
+        f"test -f {q(args.z2m_dir + '/configuration.yaml')}; "
+        f"test -f {q(args.z2m_dir + '/coordinator_backup.json')}",
+    )
     expected_files = backup.get("file_sha256") or {}
     restored_hashes = remote_hashes(args.host, args.z2m_dir)
     if expected_files and restored_hashes != expected_files:
@@ -226,7 +259,7 @@ def cmd_restore_data(args: argparse.Namespace) -> None:
     wait_state(args.host, args.addon, {"started", "running"}, timeout=120)
     require_single_z2m_owner(args.host)
     session["data_restore"] = {"utc": datetime.now(timezone.utc).isoformat(), "quarantine": quarantine}
-    session["phase"] = "ROLLED_BACK_DATA"
+    session["phase"] = PHASE_ROLLED_BACK_DATA
     save_session(args.session, session)
     print(f"P009: stopped-state data restored; failed state quarantined at {quarantine}")
 
@@ -235,12 +268,13 @@ def cmd_status(args: argparse.Namespace) -> None:
     session = load_json(args.session)
     phase = session.get("phase")
     next_step = {
+        PHASE_ARMING: "Interrupted/in-progress ARM state. Do not continue until reviewed.",
         PHASE_ARMED: "Flash exact P009 GBL via WebUI, then run postflash.",
         PHASE_IDENTITY: "Run bounded acceptance.",
         PHASE_AUTO: "Run exactly two representative group commands, then finalize with two evidence strings.",
         PHASE_ACCEPTED: "Done. Stop testing.",
         PHASE_STOPPED: "Do not continue. Review stop_reason and decide rollback/runtime/MG26.",
-        "ROLLED_BACK_DATA": "Verify coordinator firmware/identity before normal operation.",
+        PHASE_ROLLED_BACK_DATA: "Verify coordinator firmware/identity before normal operation.",
     }.get(phase, "Unknown phase; review session JSON.")
     print(json.dumps({"phase": phase, "next": next_step, "stop_reason": session.get("stop_reason")}, indent=2))
 
