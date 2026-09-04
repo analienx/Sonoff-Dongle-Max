@@ -36,6 +36,7 @@ jobs:
           node --check repo/deploy/acceptance-permitjoin.cjs
           PYTHONPATH=repo/deploy python3 repo/tests/test_p009.py
           PYTHONPATH=repo/deploy python3 repo/deploy/p009_tool.py --help >/dev/null
+          python3 repo/deploy/decode_ncp_counters.py --help >/dev/null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Nerivec/silabs-firmware-builder
@@ -84,6 +85,7 @@ jobs:
           cp builder-stock/src/zigbee_ncp/zigbee_ncp.slcp bundle/effective/STOCK-effective-zigbee_ncp.slcp
           cp builder-p009/manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml bundle/effective/sonoff_dongle-m_zigbee_ncp.yaml
           cp repo/firmware/RESOURCE-PROFILE.md bundle/RESOURCE-PROFILE.md
+          cp repo/docs/TUNING-RESEARCH.md bundle/TUNING-RESEARCH.md
           cp P009-TOOLCHAIN-EVIDENCE.txt bundle/P009-TOOLCHAIN-EVIDENCE.txt
           python3 repo/firmware/verify_build.py \
             --p009-dir bundle/p009 --stock-dir bundle/rollback-stock \
@@ -126,7 +128,7 @@ jobs:
           if-no-files-found: error
 
   runtime:
-    name: Build optional pinned herdsman runtime overlay
+    name: Build optional pinned P009 EZSP policy overlay
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -150,6 +152,7 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
           grep -F "[P009 EZSP]" dist/adapter/ember/adapter/emberAdapter.js
+          ! grep -F "[P010 PRESSURE]" dist/adapter/ember/adapter/emberAdapter.js
       - name: Package runtime overlay
         run: |
           set -euo pipefail
@@ -162,6 +165,49 @@ jobs:
         with:
           name: sonoff-dongle-max-herdsman-p009-10.9.1
           path: runtime-bundle/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: error
+
+  observability:
+    name: Build P010 diagnostic-only BUSY pressure overlay
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Koenkk/zigbee-herdsman
+          ref: 0968f979d558874b17396c96b66382d4236bbdcd
+          path: herdsman
+      - name: Apply and build diagnostic observability patch
+        run: |
+          set -euo pipefail
+          test "$(git -C herdsman rev-parse HEAD)" = "0968f979d558874b17396c96b66382d4236bbdcd"
+          python3 repo/runtime/patch_herdsman_observability.py herdsman
+          git -C herdsman diff --check
+          cd herdsman
+          corepack enable
+          corepack prepare pnpm@10.33.0 --activate
+          pnpm install --frozen-lockfile
+          pnpm run build
+          grep -F "[P010 PRESSURE]" dist/adapter/ember/adapter/emberAdapter.js
+          grep -F "ezspReadCounters" dist/adapter/ember/adapter/emberAdapter.js
+          ! grep -F "[P009 EZSP]" dist/adapter/ember/adapter/emberAdapter.js
+      - name: Package diagnostic overlay
+        run: |
+          set -euo pipefail
+          mkdir -p observability-bundle
+          cp herdsman/dist/adapter/ember/adapter/emberAdapter.js observability-bundle/
+          git -C herdsman diff --binary > observability-bundle/zigbee-herdsman-10.9.1-p010-observability.patch
+          cp repo/runtime/OBSERVABILITY.md observability-bundle/README.md
+          (cd observability-bundle && sha256sum emberAdapter.js zigbee-herdsman-10.9.1-p010-observability.patch README.md > SHA256SUMS && sha256sum -c SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonoff-dongle-max-herdsman-p010-observability-10.9.1
+          path: observability-bundle/
           compression-level: 9
           retention-days: 30
           if-no-files-found: error
