@@ -87,7 +87,7 @@ def profile(slcp: Path) -> dict[str, int | str]:
         "SL_ZIGBEE_BROADCAST_TABLE_SIZE",
         "SL_ZIGBEE_KEY_TABLE_SIZE",
     }
-    for name in COMMON_PROFILE | {"SL_ZIGBEE_BROADCAST_TABLE_SIZE", "SL_ZIGBEE_KEY_TABLE_SIZE"}:
+    for name in (*COMMON_PROFILE, "SL_ZIGBEE_BROADCAST_TABLE_SIZE", "SL_ZIGBEE_KEY_TABLE_SIZE"):
         out[name] = extract_value(text, name, xg24=name not in global_names)
     out["SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE"] = extract_eusart_rx_buffer(text)
     heap_pat = r"- name: SL_ZIGBEE_PACKET_BUFFER_HEAP_SIZE\s*\n\s+value: (SL_ZIGBEE_HUGE_PACKET_BUFFER_HEAP)\s*\n\s+condition: \[\"device_generic_family_efr32xg24\"\]"

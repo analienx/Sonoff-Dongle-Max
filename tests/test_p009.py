@@ -10,13 +10,42 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
+FIRMWARE = ROOT / "firmware"
 if str(DEPLOY) not in sys.path:
     sys.path.insert(0, str(DEPLOY))
+if str(FIRMWARE) not in sys.path:
+    sys.path.insert(0, str(FIRMWARE))
 
 from decode_ncp_counters import decode_line, summary
 from p009_accept import parse_json_output
 from p009_common import appended_logs, compare_identity, configure_remote, remote_argv, safe_identity_from_backup_doc
 from p009_deploy import PHASE_ARMED, PHASE_FLASH, PHASE_IDENTITY, cmd_confirm_flash, require_phase, runtime_readbacks, validate_session_target
+from verify_build import COMMON_PROFILE, P009_ONLY, STOCK_ONLY, profile, validate_profile
+
+
+def synthetic_slcp(rx_buffer: int, broadcast_table: int, key_table: int) -> str:
+    entries = [
+        ("SL_ZIGBEE_MULTICAST_TABLE_SIZE", 26, None),
+        ("SL_ZIGBEE_NEIGHBOR_TABLE_SIZE", 26, None),
+        ("SL_ZIGBEE_BINDING_TABLE_SIZE", 32, None),
+        ("SL_ZIGBEE_BROADCAST_TABLE_SIZE", broadcast_table, None),
+        ("SL_ZIGBEE_KEY_TABLE_SIZE", key_table, None),
+        ("SL_ZIGBEE_DISCOVERY_TABLE_SIZE", 16, "xg24"),
+        ("SL_ZIGBEE_ROUTE_TABLE_SIZE", 254, "xg24"),
+        ("SL_ZIGBEE_SOURCE_ROUTE_TABLE_SIZE", 254, "xg24"),
+        ("SL_ZIGBEE_ADDRESS_TABLE_SIZE", 128, "xg24"),
+        ("SL_ZIGBEE_APS_UNICAST_MESSAGE_COUNT", 128, "xg24"),
+        ("SL_ZIGBEE_MAX_END_DEVICE_CHILDREN", 64, "xg24"),
+        ("SL_ZIGBEE_APS_DUPLICATE_REJECTION_MAX_ENTRIES", 64, "xg24"),
+        ("SL_ZIGBEE_PACKET_BUFFER_HEAP_SIZE", "SL_ZIGBEE_HUGE_PACKET_BUFFER_HEAP", "xg24"),
+    ]
+    parts = []
+    for name, value, condition in entries:
+        parts.append(f"  - name: {name}\n    value: {value}")
+        if condition == "xg24":
+            parts.append('    condition: ["device_generic_family_efr32xg24"]')
+    parts.append(f"  - name: SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE\n    value: {rx_buffer}\n    condition:\n      - iostream_eusart")
+    return "\n".join(parts) + "\n"
 
 
 class P009Tests(unittest.TestCase):
@@ -120,6 +149,34 @@ class P009Tests(unittest.TestCase):
             )
             cmd_confirm_flash(args)
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["phase"], PHASE_FLASH)
+
+    def test_verify_build_profile_extraction_matches_p009_delta(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "p009.slcp"
+            path.write_text(synthetic_slcp(rx_buffer=512, broadcast_table=64, key_table=12), encoding="utf-8")
+            got = profile(path)
+        validate_profile(got, P009_ONLY)
+        self.assertEqual(got["SL_ZIGBEE_BROADCAST_TABLE_SIZE"], 64)
+        self.assertEqual(got["SL_ZIGBEE_KEY_TABLE_SIZE"], 12)
+        self.assertEqual(got["SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE"], 512)
+        self.assertEqual(got["SL_ZIGBEE_PACKET_BUFFER_HEAP_SIZE"], "SL_ZIGBEE_HUGE_PACKET_BUFFER_HEAP")
+        for name, value in COMMON_PROFILE.items():
+            self.assertEqual(got[name], value)
+
+    def test_verify_build_profile_extraction_matches_stock_delta(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "stock.slcp"
+            path.write_text(synthetic_slcp(rx_buffer=128, broadcast_table=30, key_table=1), encoding="utf-8")
+            got = profile(path)
+        validate_profile(got, STOCK_ONLY)
+
+    def test_verify_build_profile_rejects_wrong_delta(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "bad.slcp"
+            path.write_text(synthetic_slcp(rx_buffer=128, broadcast_table=64, key_table=1), encoding="utf-8")
+            got = profile(path)
+        with self.assertRaises(SystemExit):
+            validate_profile(got, STOCK_ONLY)
 
     def test_ncp_counter_decoder_extracts_pressure_signals(self):
         values = [0] * 42
