@@ -87,7 +87,7 @@ APS duplicate rejection            256 B
 
 ## Why multicast32 is included without an occupancy campaign
 
-The multicast table controls coordinator memberships used to receive group traffic; it is not a multicast transmit queue. Pinned herdsman consumes fixed memberships and dynamically registers application groups. With roughly 21 application groups, 26 entries leaves limited theoretical margin.
+The multicast table controls coordinator memberships used to receive group traffic; it is not a multicast transmit queue. Pinned herdsman consumes fixed memberships and dynamically registers application group memberships. With roughly 21 application groups, 26 entries leaves limited theoretical margin.
 
 Raising 26 -> 32:
 
@@ -117,8 +117,8 @@ Do not copy ZBT-2-specific 460800/CTS-RTS settings onto the SONOFF board without
 The CI bundle treats these as separate evidence layers:
 
 1. patched/stock source-profile inputs;
-2. generated component/configuration output and linker maps;
-3. linked ELF section/symbol assertions;
+2. generated component/configuration/build metadata (including `sl_component_catalog.h`; linker `.map` files are archived only if this builder emits them);
+3. linked ELF `readelf` section/symbol reports plus executable section/symbol assertions;
 4. hashed GBL/HEX/OUT artifacts;
 5. post-startup runtime evidence collected later by the single Zigbee2MQTT owner.
 
