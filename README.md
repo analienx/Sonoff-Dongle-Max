@@ -2,7 +2,7 @@
 
 Experimental large-network firmware and controlled deployment tooling for the **SONOFF Dongle-M / Dongle Max** based on Silicon Labs **EFR32MG24A420F1536IM48**.
 
-The objective is narrow: keep the known-good network/radio/routing behavior, add measured headroom where this production network has repeatedly returned `SLStatus.BUSY`, and make every deployment claim traceable to a specific binary and a current Zigbee2MQTT owner session.
+The objective is narrow: keep the known-good network/radio/routing behavior, add sensible headroom where this production network has repeatedly returned `SLStatus.BUSY`, and make every deployment claim traceable to a specific binary and a current Zigbee2MQTT owner session.
 
 Engineering issue: https://github.com/analienx/Sonoff-Dongle-Max/issues/1
 
@@ -24,13 +24,14 @@ EUSART1
 no hardware flow control
 ```
 
-P009 changes **exactly three** compile-time values versus the matched stock rollback image:
+P009 changes **exactly four** compile-time values versus the matched stock rollback image:
 
 | Resource | Stock | P009 | Purpose |
 |---|---:|---:|---|
 | EUSART VCOM RX buffer | 128 | **512** | Short host-to-NCP burst tolerance. |
 | Zigbee broadcast table | 30 | **64** | Primary broadcast-admission headroom hypothesis. |
 | Zigbee key table | 1 | **12** | Reasonable APS/link-key storage matching current MG24 production precedent. |
+| Zigbee multicast table | 26 | **32** | Six extra receive-membership slots for ~24 B linked RAM. |
 
 Everything else in the retained large-network profile stays unchanged:
 
@@ -40,7 +41,6 @@ source-route table              254
 address table                   128
 APS unicast messages            128
 discovery table                  16
-multicast table                  26
 neighbor table                   26  # Silicon Labs maximum
 binding table                    32
 compiled max end-device children 64
@@ -53,30 +53,32 @@ retry queue                      16
 
 The linked NCP contains capacity for 64 direct end-device children, but pinned stock zigbee-herdsman 10.9.1 normally attempts to set the **runtime maximum direct children to 32** unless `stack_config.json` changes it. Network size and direct-child count are not the same thing.
 
-Stock herdsman does **not** appear to rewrite P009's broadcast-table size 64 or key-table size 12 downward. The effective `NEW_BROADCAST_ENTRY_THRESHOLD` under the stock host is still treated as **unresolved** until it is read through a supported owner-side path. The prepared threshold-48 runtime overlay therefore must not be deployed merely because the binary has BTT64.
+Stock herdsman does **not** appear to rewrite P009's broadcast-table size 64 or key-table size 12 downward. Multicast capacity is firmware-side; herdsman consumes memberships but does not resize the table. The effective `NEW_BROADCAST_ENTRY_THRESHOLD` under the stock host remains a separate runtime admission-policy question. The prepared threshold-48 runtime overlay therefore must not be deployed merely because the binary has BTT64.
 
-## What the linked binary actually costs
+## What the linked binary costs
 
-The approved pinned-toolchain ELF audit found:
+The pre-multicast hardening audit measured the three-delta P009 image at +704 B `.bss`. Promoting multicast 26→32 adds six 4-byte entries, so the current linked contract is:
 
 | Quantity | Stock | P009 | Delta |
 |---|---:|---:|---:|
-| `.bss` proper | 22,284 B | 22,988 B | **+704 B** |
+| `.bss` proper | 22,284 B | 23,012 B | **+728 B** |
 | memory-manager reservation | 229,896 B | 229,896 B | 0 B |
-| GBL file | 268,896 B | 268,992 B | +96 B |
 
-The +704 B static change is explained by:
+The expected +728 B static change is:
 
 ```text
 RX buffer                         +384 B
 broadcast backing array           +272 B
 incoming APS/key counter metadata  +44 B
+multicast membership array         +24 B
 alignment/layout                     +4 B
 ```
 
-For this linked image the broadcast backing array is 240 B for 30 entries and 512 B for 64 entries: **8 B per linked entry**, not the older generic 6-B estimate.
+CI verifies those exact section and symbol sizes in the freshly linked ELF. The current GBL size/hash are taken from the successful CI artifact rather than copied forward from an older build.
 
-The 229,896-B `.memory_manager_heap` reservation is **not a measurement of free Zigbee packet memory**. Runtime packet-pool acquisition, fragmentation, low-water marks and transient allocations require live evidence.
+For this stack generation the broadcast backing array is **8 B per entry** and multicast membership storage is **4 B per entry**.
+
+The 229,896-B `.memory_manager_heap` reservation is **not a measurement of free Zigbee packet memory**. Runtime packet-pool acquisition, fragmentation, low-water marks and transient allocations are separate questions.
 
 ## Failure model
 
@@ -90,7 +92,7 @@ Lights All                      group 8
 
 Coordinator-only Permit Join controls were clean while network-wide Permit Join reproduced the same class of failure. This keeps broadcast/NWK admission pressure as the leading hypothesis.
 
-It is not yet proven that every BUSY was literally caused by a full broadcast table. Other credible admission-pressure branches include:
+It is not proven that every BUSY was literally caused by a full broadcast table. Other credible admission-pressure branches include:
 
 - local broadcast-entry threshold;
 - shared packet-buffer exhaustion;
@@ -100,13 +102,13 @@ It is not yet proven that every BUSY was literally caused by a full broadcast ta
 - route/concentrator background work;
 - RF contention prolonging resource occupancy.
 
-P009 therefore increases a justified capacity but keeps counter-based diagnostics available if BUSY remains.
+P009 therefore increases justified capacity but keeps counter-based diagnostics available if BUSY remains.
 
-## Multicast/group capacity
+## Why multicast32 is included directly
 
-`SL_ZIGBEE_MULTICAST_TABLE_SIZE=26` is not a transmit queue. It tracks coordinator memberships used for receiving group traffic. Pinned herdsman also consumes fixed memberships and dynamically registers application groups, so a network with ~21 groups can be materially closer to 26 slots than earlier documentation implied.
+`SL_ZIGBEE_MULTICAST_TABLE_SIZE` is not a transmit queue. It tracks coordinator memberships used for receiving group traffic. Pinned herdsman consumes fixed memberships and dynamically registers application groups, so a network with roughly 21 groups has limited theoretical margin at 26 entries.
 
-We do **not** increase this table in P009. Actual occupancy/registration evidence comes first; only then would a separate 26→32 candidate make sense.
+A precise occupancy campaign would be possible, but 26→32 costs only about **24 B** of linked static RAM and does not alter routing, channel, PAN, keys, broadcast admission, transport, or transmit timing. That is sufficiently low-risk to take proactively rather than spending hours proving the exact current occupancy first.
 
 ## Transport
 
@@ -158,7 +160,7 @@ Important safeguards include:
 - exactly one expected HA Zigbee2MQTT add-on owner;
 - current Docker container ID/start epoch;
 - current-session startup logs rather than an old log tail;
-- correlated Zigbee2MQTT health response;
+- correlated Zigbee2MQTT health response requiring `status=ok` and `data.healthy=true`;
 - live network identity from current `bridge/info`;
 - network-key SHA256 computed inside the current owner container, never copied as plaintext;
 - stopped-state config/database/backup hashes and tar backup;
@@ -195,7 +197,7 @@ SUPPORTED_NETWORKS                  1
 SEND_MULTICASTS_TO_SLEEPY_ADDRESS  0
 ```
 
-Because threshold 48 changes local-vs-relayed broadcast admission policy, the whole six-value overlay must not be deployed simply to “make firmware values stick”. First determine the stock effective baseline.
+Because threshold 48 changes local-vs-relayed broadcast admission policy, the whole six-value overlay must not be deployed simply to “make firmware values stick”.
 
 ### P010 observability overlay
 
@@ -216,7 +218,7 @@ It does not clear counters, retry a send or change configuration.
 
 ## Next architecture: identity-only XNCP
 
-The architecture review recommends a small follow-up XNCP extension that reports a deterministic project/board/schema/build/profile identity on request while remaining ignorable by stock Zigbee2MQTT. This should be a **new identifiable firmware variant**, not silently added to the already-reviewed P009 binary.
+The architecture review recommends a small follow-up XNCP extension that reports deterministic project/board/schema/build/profile identity on request while remaining ignorable by stock Zigbee2MQTT. This should be a **new identifiable firmware variant**, not silently added to the already-reviewed P009 binary.
 
 The first XNCP version should remain identity-only; health fields should be added only where supported APIs and bounded response semantics are established.
 
@@ -228,9 +230,11 @@ The first XNCP version should remain identity-only; health fields should be adde
 - no RF-power experiment;
 - no route/source-route growth beyond 254;
 - no neighbor table above the hard maximum 26;
+- no forced runtime child64 without direct-child pressure;
 - no blanket BUSY retries;
 - no retry-queue enlargement;
 - no BTT254 “max everything” profile;
+- no threshold48 in the first stock-host test;
 - no ZBT-2 transport copy;
 - no deployment of P009 policy or P010 diagnostics during the first stock-host acceptance.
 
