@@ -1,128 +1,190 @@
-# SONOFF Dongle Max / Dongle-M — P009 MG24 firmware
+# SONOFF Dongle Max / Dongle-M — MG24 P009 firmware
 
-Experimental large-network firmware and controlled deployment tooling for the **SONOFF Dongle-M / Dongle Max** based on Silicon Labs **EFR32MG24**.
+Experimental large-network firmware and controlled deployment tooling for the **SONOFF Dongle-M / Dongle Max** based on Silicon Labs **EFR32MG24A420F1536IM48**.
 
-The current firmware profile, **P009**, is built from the same pinned EmberZNet 9.1.1 / EZSP 19 baseline used for the stock rollback image. It deliberately keeps the proven radio, serial and routing configuration while increasing two constrained NCP resource tables that matter on larger or broadcast-heavy Zigbee networks.
+The objective is narrow: keep the known-good network/radio/routing behavior, add measured headroom where this production network has repeatedly returned `SLStatus.BUSY`, and make every deployment claim traceable to a specific binary and a current Zigbee2MQTT owner session.
 
-> **Goal:** keep stock behavior where it is already good, add more NCP headroom where production testing showed repeated `SLStatus.BUSY`, and make deployment/rollback reproducible and safe.
+Engineering issue: https://github.com/analienx/Sonoff-Dongle-Max/issues/1
 
-P009 is not a generic Zigbee performance hack and it does not change RF power, channel, network identity, routing strategy or retry behavior.
+Architecture review: https://github.com/analienx/Sonoff-Dongle-Max/issues/7
 
-Active work: https://github.com/analienx/Sonoff-Dongle-Max/issues/1
+Historical production investigation: https://github.com/analienx/home-assistant-stack/issues/47
 
-Historical root-cause investigation: https://github.com/analienx/home-assistant-stack/issues/47
+## P009 firmware profile
 
-## What is different from the stock 9.1.1 baseline?
-
-P009 changes only two compile-time resource values in the pinned MG24 NCP profile:
-
-| Resource | Stock baseline | P009 | Why |
-|---|---:|---:|---|
-| Zigbee broadcast table | 30 | **64** | More simultaneous broadcast-transaction headroom before the NCP must reject new broadcast work. |
-| Zigbee key table | 1 | **12** | More capacity for APS/link-key entries instead of leaving the coordinator at the unusually small upstream default. |
-
-The build verifier fails unless these are the **only intended profile differences** between the P009 and rollback builds.
-
-### Important resources deliberately left unchanged
-
-| Resource | P009 |
-|---|---:|
-| Route table | 254 |
-| Source-route table | 254 |
-| Address table | 128 |
-| APS unicast messages | 128 |
-| Discovery table | 16 |
-| Multicast table | 26 |
-| Neighbor table | **26 (Silicon Labs maximum)** |
-| Binding table | 32 |
-| Max end-device children | 64 |
-| APS duplicate-rejection entries | 64 |
-| Packet-buffer heap | HUGE |
-| Retry queue | 16 |
-| Store-and-forward | 5 |
-
-**Neighbor-table note:** this is already fully tuned. Silicon Labs supports neighbor-table sizes of 1, 16 or **26**, with 26 the maximum number of router neighbors the Ember stack can track. P009 therefore retains 26 rather than inventing an unsupported 27/32 setting. This is also the value used by Nabu Casa's current MG24 ZBT-2 profile. End-device children are tracked separately; route/source-route capacity is also separate and is already set to 254.
-
-Transport is also unchanged:
+Pinned base:
 
 ```text
-EFR32MG24A420F1536IM48
+Simplicity SDK 2026.6.1
 EmberZNet 9.1.1
 EZSP 19
+EFR32MG24A420F1536IM48
 EUSART1
 115200 baud
 no hardware flow control
 ```
 
-## Why might P009 be better on a large Zigbee network?
+P009 changes **exactly three** compile-time values versus the matched stock rollback image:
 
-### 1. More broadcast headroom
+| Resource | Stock | P009 | Purpose |
+|---|---:|---:|---|
+| EUSART VCOM RX buffer | 128 | **512** | Short host-to-NCP burst tolerance. |
+| Zigbee broadcast table | 30 | **64** | Primary broadcast-admission headroom hypothesis. |
+| Zigbee key table | 1 | **12** | Reasonable APS/link-key storage matching current MG24 production precedent. |
 
-The primary reason for P009 is repeated Ember/NCP `BUSY` responses observed on a production network with more than 100 devices, especially on broadcast paths such as **Permit Join All** and other operations that fan out across the mesh.
-
-The pinned stock MG24 builder allocates **30 broadcast-table entries**. P009 raises that to **64**. The expected effect is that the NCP can keep more broadcast transactions in flight before refusing additional broadcast work.
-
-This may improve reliability of:
-
-- Zigbee group/broadcast operations;
-- Permit Join All;
-- network-management broadcasts;
-- busy periods where application broadcasts overlap routing/mesh traffic.
-
-This is the main P009 hypothesis and is being verified with bounded production acceptance tests. It should not be interpreted as a guarantee that every `BUSY` condition comes from the broadcast table.
-
-### 2. Less dependence on retry workarounds
-
-An earlier workaround retried failed broadcast sends. P009 intentionally does **not** add more retries or enlarge the retry queue.
-
-The preferred strategy is:
+Everything else in the retained large-network profile stays unchanged:
 
 ```text
-more real NCP capacity
-        instead of
-more software retries under pressure
+route table                     254
+source-route table              254
+address table                   128
+APS unicast messages            128
+discovery table                  16
+multicast table                  26
+neighbor table                   26  # Silicon Labs maximum
+binding table                    32
+compiled max end-device children 64
+APS duplicate rejection          64
+packet-buffer heap              HUGE
+retry queue                      16
 ```
 
-That should reduce the risk of turning temporary congestion into additional queued traffic.
+### Compile-time capacity is not always runtime policy
 
-### 3. More sensible key-table capacity
+The linked NCP contains capacity for 64 direct end-device children, but pinned stock zigbee-herdsman 10.9.1 normally attempts to set the **runtime maximum direct children to 32** unless `stack_config.json` changes it. Network size and direct-child count are not the same thing.
 
-The upstream baseline used by this build has a key table of only **1** entry. P009 raises it to **12** while leaving security behavior itself unchanged.
+Stock herdsman does **not** appear to rewrite P009's broadcast-table size 64 or key-table size 12 downward. The effective `NEW_BROADCAST_ENTRY_THRESHOLD` under the stock host is still treated as **unresolved** until it is read through a supported owner-side path. The prepared threshold-48 runtime overlay therefore must not be deployed merely because the binary has BTT64.
 
-This does not make Zigbee encryption “stronger”. It simply gives the coordinator more room for devices or features that require APS/link-key table entries.
+## What the linked binary actually costs
 
-### 4. Neighbor/routing capacity is already near the useful ceiling
+The approved pinned-toolchain ELF audit found:
 
-The coordinator's **neighbor table is already at Ember's hard maximum of 26 router neighbors**, so P009 does not try to enlarge it further. Likewise, the route and source-route tables are already 254 entries each. That means P009's resource tuning is aimed at the remaining demonstrated pressure point—broadcast admission—rather than changing already-maximized mesh-topology tables.
+| Quantity | Stock | P009 | Delta |
+|---|---:|---:|---:|
+| `.bss` proper | 22,284 B | 22,988 B | **+704 B** |
+| memory-manager reservation | 229,896 B | 229,896 B | 0 B |
+| GBL file | 268,896 B | 268,992 B | +96 B |
 
-A larger neighbor table would not increase radio range or make every router a direct neighbor; direct-neighbor quality still depends on RF placement and topology.
+The +704 B static change is explained by:
 
-### 5. Everything else stays familiar
+```text
+RX buffer                         +384 B
+broadcast backing array           +272 B
+incoming APS/key counter metadata  +44 B
+alignment/layout                     +4 B
+```
 
-P009 does not attempt to solve unrelated Zigbee problems by changing many parameters at once. Keeping routing tables, source routing, UART transport, RF/network identity and retry behavior unchanged makes the result easier to attribute and easier to roll back.
+For this linked image the broadcast backing array is 240 B for 30 entries and 512 B for 64 entries: **8 B per linked entry**, not the older generic 6-B estimate.
 
-## What P009 does **not** change
+The 229,896-B `.memory_manager_heap` reservation is **not a measurement of free Zigbee packet memory**. Runtime packet-pool acquisition, fragmentation, low-water marks and transient allocations require live evidence.
 
-P009 does not:
+## Failure model
 
-- change Zigbee channel;
-- change coordinator IEEE/PAN/extPAN/network key;
-- clear NVM;
-- require devices to be paired again;
-- increase RF transmit power;
-- change EUSART baud rate or flow control;
-- enlarge the retry queue;
-- add broad `BUSY` retry loops;
-- replace Zigbee2MQTT by default;
-- promise higher LQI/RSSI or magically repair a weak RF mesh.
+Production evidence contains real group/broadcast-path `BUSY`, not only Permit Join:
 
-If a network problem is caused by RF interference, poor router placement, a bad device, route churn or host instability, a larger broadcast table is not a substitute for fixing that root cause.
+```text
+Kitchen Table Bulbs             group 25
+Sockets Nonessential Shutdown   group 31
+Lights All                      group 8
+```
 
-## Optional runtime policy
+Coordinator-only Permit Join controls were clean while network-wide Permit Join reproduced the same class of failure. This keeps broadcast/NWK admission pressure as the leading hypothesis.
 
-The repository also prepares an **optional**, pinned zigbee-herdsman 10.9.1 policy overlay. It is not deployed during the firmware-first test.
+It is not yet proven that every BUSY was literally caused by a full broadcast table. Other credible admission-pressure branches include:
 
-If later required, it explicitly sets and reads back:
+- local broadcast-entry threshold;
+- shared packet-buffer exhaustion;
+- PHY-to-MAC queue pressure;
+- NWK retry congestion;
+- callback/host transport backlog;
+- route/concentrator background work;
+- RF contention prolonging resource occupancy.
+
+P009 therefore increases a justified capacity but keeps counter-based diagnostics available if BUSY remains.
+
+## Multicast/group capacity
+
+`SL_ZIGBEE_MULTICAST_TABLE_SIZE=26` is not a transmit queue. It tracks coordinator memberships used for receiving group traffic. Pinned herdsman also consumes fixed memberships and dynamically registers application groups, so a network with ~21 groups can be materially closer to 26 slots than earlier documentation implied.
+
+We do **not** increase this table in P009. Actual occupancy/registration evidence comes first; only then would a separate 26→32 candidate make sense.
+
+## Transport
+
+P009 keeps the SONOFF board contract:
+
+```text
+EUSART1
+115200
+no RTS/CTS
+```
+
+RX512 adds short-burst storage only. At 115200 8N1, nominal line rate is about 11,520 B/s: 128 B is ~11 ms of line-rate storage, while 512 B is ~44 ms. It does not raise sustained throughput or prove the ESP bridge cannot bottleneck.
+
+Do not copy Nabu Casa ZBT-2's 460800/CTS-RTS settings onto the SONOFF board without end-to-end hardware proof.
+
+## Evidence layers
+
+This repository deliberately separates four different claims:
+
+1. **Source profile** — what SLCP/manifest inputs requested.
+2. **Linked binary evidence** — what key objects/sections actually exist in the `.out` ELF.
+3. **Artifact integrity** — exact GBL/HEX/OUT hashes from one CI run.
+4. **Running-session evidence** — what the current Zigbee2MQTT owner reports after startup.
+
+A copied SLCP is not called “effective configuration”. A manually acknowledged GBL SHA is not called device-side firmware attestation.
+
+The hardened build artifact contains source inputs, generated configuration, linker maps, `readelf` evidence, toolchain evidence, linked-object assertions and a schema-versioned build manifest.
+
+## Controlled deployment
+
+Deployment uses a persistent state machine:
+
+```text
+ARMING
+  -> ARMED
+  -> FLASH_CONFIRMED
+  -> IDENTITY_VERIFIED
+  -> AUTOMATED_ACCEPTANCE_PASSED
+  -> ACCEPTED
+
+Any failed/incomplete safety gate -> STOPPED
+```
+
+Important safeguards include:
+
+- exact source commit + build-manifest binding;
+- whole-bundle SHA256 verification;
+- exact P009 and matched stock-rollback GBL hashes/sizes;
+- exactly one expected HA Zigbee2MQTT add-on owner;
+- current Docker container ID/start epoch;
+- current-session startup logs rather than an old log tail;
+- correlated Zigbee2MQTT health response;
+- live network identity from current `bridge/info`;
+- network-key SHA256 computed inside the current owner container, never copied as plaintext;
+- stopped-state config/database/backup hashes and tar backup;
+- fail-fast acceptance with partial failure evidence persisted before STOP;
+- same-owner/start-epoch checks across acceptance and finalization.
+
+Until a dedicated XNCP identity variant is implemented, post-flash evidence proves current generic EmberZNet 9.1.1/EZSP19 operation and unchanged network identity; the exact P009 binary remains tied to the human-selected, hash-verified artifact. Those are intentionally different claims.
+
+## Bounded acceptance
+
+After the post-flash identity gate:
+
+1. exactly **16 completed unique** read-only transactions (2 × 8 targets), at least 15 successful;
+2. up to five serial 10-second Permit Join All trials; in a clean path exactly five, but **stop opening new windows on the first hard failure**;
+3. correlated final Permit Join close and a fresh `permit_join=false` observation;
+4. complete acceptance log window scanned for BUSY/message-pressure/reset/disconnect/network-down signatures;
+5. exactly two structured real-group checks with command result and human-verified physical result;
+6. final current-session identity check.
+
+This is a bounded operational screen, **not statistical proof of long-term reliability**. If it passes, stop testing. If it fails, preserve the first failure and diagnose from evidence rather than adding retries or a parameter matrix.
+
+## Optional runtime work
+
+### P009 policy overlay
+
+Prepared separately and **not part of the first firmware-only test**. It sets/readbacks:
 
 ```text
 BROADCAST_TABLE_SIZE               64
@@ -133,102 +195,52 @@ SUPPORTED_NETWORKS                  1
 SEND_MULTICASTS_TO_SLEEPY_ADDRESS  0
 ```
 
-The threshold of **48** deliberately leaves 16 of the 64 broadcast entries available for relaying broadcasts originated elsewhere in the mesh.
+Because threshold 48 changes local-vs-relayed broadcast admission policy, the whole six-value overlay must not be deployed simply to “make firmware values stick”. First determine the stock effective baseline.
 
-Every value must read back correctly or Zigbee2MQTT startup fails loudly. The overlay does not modify the existing herdsman send/retry algorithm.
+### P010 observability overlay
 
-## Reproducible stock rollback
+Diagnostic-only. On a residual group/broadcast BUSY it schedules one **non-blocking, single-flight, 5-second-coalesced** read-only counter snapshot behind the owner queue, while propagating the original BUSY immediately.
 
-A major feature of this repository is not just the tuned firmware itself, but the way it is built.
-
-Every CI run builds:
-
-1. **P009 firmware**;
-2. an **unmodified stock rollback firmware**;
-3. both from the **same pinned Silicon Labs builder/toolchain**.
-
-The artifact contains:
-
-- `.gbl`, `.hex` and `.out` for P009;
-- `.gbl`, `.hex` and `.out` for stock rollback;
-- effective stock and P009 resource profiles;
-- the exact SONOFF hardware manifest;
-- build/toolchain provenance;
-- `P009-BUILD-MANIFEST.json`;
-- `SHA256SUMS` for the entire bundle.
-
-This makes rollback a first-class part of the build rather than an unrelated firmware download found later.
-
-## Controlled deployment tooling
-
-The `deploy/` tooling treats firmware flashing as a stateful production change instead of a loose list of shell commands.
+It watches pressure counters such as:
 
 ```text
-ARMING
-  -> ARMED
-  -> FLASH_CONFIRMED
-  -> IDENTITY_VERIFIED
-  -> AUTOMATED_ACCEPTANCE_PASSED
-  -> ACCEPTED
-
-Any failed/interrupted safety gate -> STOPPED
+BROADCAST_TABLE_FULL
+ALLOCATE_PACKET_BUFFER_FAILURE
+PHY_TO_MAC_QUEUE_LIMIT_REACHED
+TYPE_NWK_RETRY_OVERFLOW
+PHY_CCA_FAIL_COUNT
+ASH_OVERFLOW/FRAMING/OVERRUN
 ```
 
-Notable safeguards:
+It does not clear counters, retry a send or change configuration.
 
-- verifies all build-bundle checksums before ARM;
-- verifies exactly one running Zigbee2MQTT owner;
-- creates and hashes a stopped-state Z2M backup;
-- fingerprints the network key **on the HA host** without copying the plaintext key to deployment evidence;
-- locks a deployment session to the exact host, add-on, Zigbee2MQTT path and SSH/proxy transport;
-- requires explicit confirmation of the ARM-verified P009 GBL SHA-256 after the manual WebUI flash;
-- checks IEEE, PAN ID, extended PAN ID, channel, network-key fingerprint, key sequence and backup device count after flashing;
-- automatically stops on safety-gate failures;
-- keeps the actual firmware upload manual through the already-proven SONOFF WebUI path;
-- includes a same-build stock rollback image and hash-verified data restore path.
+## Next architecture: identity-only XNCP
 
-The CLI itself never flashes firmware.
+The architecture review recommends a small follow-up XNCP extension that reports a deterministic project/board/schema/build/profile identity on request while remaining ignorable by stock Zigbee2MQTT. This should be a **new identifiable firmware variant**, not silently added to the already-reviewed P009 binary.
 
-## Bounded acceptance instead of endless soak testing
+The first XNCP version should remain identity-only; health fields should be added only where supported APIs and bounded response semantics are established.
 
-After flashing, P009 uses a deliberately small acceptance gate:
+## What P009 deliberately does not do
 
-- read-only **2 × 8 real ZCL transaction canary**;
-- exactly **5 × 10-second Permit Join All** trials;
-- scan the test window for `BUSY`, message-pressure errors and NCP/ASH resets;
-- exactly **2 representative group commands** with physical verification;
-- final network-identity recheck.
-
-If this passes, testing stops. If `BUSY` still reproduces, the exact failure is captured and the next decision is made from evidence rather than running a large parameter matrix.
-
-## Expected benefit summary
-
-For a small, healthy Zigbee network, P009 may provide little or no visible difference from stock firmware.
-
-For a **large MG24 network with significant broadcast/group traffic**, P009 is intended to provide:
-
-- more NCP broadcast capacity;
-- fewer broadcast-path `BUSY` rejections;
-- better tolerance of short traffic bursts;
-- less need for host-side retry workarounds;
-- more reasonable APS/link-key table capacity;
-- deterministic rollback and much safer firmware deployment.
-
-The first four are **expected engineering benefits**, not yet universal performance claims. Production acceptance results will be recorded in issue #1.
+- no NVM clear or factory reset;
+- no network-key/PAN/extPAN/channel change;
+- no re-pairing requirement;
+- no RF-power experiment;
+- no route/source-route growth beyond 254;
+- no neighbor table above the hard maximum 26;
+- no blanket BUSY retries;
+- no retry-queue enlargement;
+- no BTT254 “max everything” profile;
+- no ZBT-2 transport copy;
+- no deployment of P009 policy or P010 diagnostics during the first stock-host acceptance.
 
 ## Repository layout
 
-- `firmware/` — pinned MG24 source patch, resource contract and strict P009/stock artifact verifier.
-- `deploy/` — resumable deployment state machine, remote transport and bounded acceptance probes.
-- `runtime/` — optional pinned zigbee-herdsman 10.9.1 policy overlay.
-- `tests/` — regression tests for transport, identity, policy readbacks and deployment gates.
-- `docs/EXECUTOR-DEPLOY.md` — mechanical deployment procedure.
-- `.github/workflows/build-p009.yml` — controlled P009 + same-toolchain stock rollback build.
+- `firmware/` — pinned source patch, resource contract, linked-image verifier.
+- `deploy/` — guarded state machine and bounded acceptance tooling.
+- `runtime/` — separate P009 policy and P010 diagnostic overlays.
+- `tests/` — regression tests for profiles, linked evidence and deployment gates.
+- `docs/` — research, special architecture review and executor runbook.
+- `.github/workflows/build-p009.yml` — P009 + matched rollback build and evidence bundle.
 
-Development is staged on `p009-staging`. The firmware workflow is triggered from `p009-mg24-broadcast-headroom` only after staging review, avoiding unnecessary intermediate firmware builds.
-
-## Status
-
-**Experimental / production validation in progress.**
-
-P009 is designed to be conservative and reversible, but it is still custom coordinator firmware. Review `docs/EXECUTOR-DEPLOY.md` and issue #1 before flashing.
+Current hardening work is performed on `p009-hardening`. Production flashing remains paused until the hardening build is fully green and its new artifact is reviewed.
