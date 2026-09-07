@@ -35,7 +35,7 @@ rollback-stock/
 SHA256SUMS
 ```
 
-`P009-BUILD-MANIFEST.json` binds the exact repository source commit, builder pin, RX512/BTT64/KEY12 source profile, linked-ELF evidence and artifact hashes. Any mismatch: **STOP before touching HA**.
+`P009-BUILD-MANIFEST.json` binds the exact repository source commit, builder pin, RX512/BTT64/KEY12/multicast32 source profile, linked-ELF evidence and artifact hashes. The approved linked profile requires `.bss` delta **728 B** and unchanged memory-manager reservation. Any mismatch: **STOP before touching HA**.
 
 Work from the exact source commit recorded in the manifest. Hardened `arm` rejects a different local Git HEAD.
 
@@ -66,12 +66,13 @@ ARM now proves more than the old runbook:
 - exact source commit matches build manifest;
 - whole bundle hashes valid;
 - exact P009/stock GBL SHA256 **and byte size** valid;
-- linked-ELF evidence in manifest was validated by CI;
+- P009 source profile is RX512/BTT64/KEY12/multicast32 and stock rollback is RX128/BTT30/key1/multicast26;
+- linked-ELF evidence in manifest was validated by CI, including the 728-B `.bss` delta;
 - exactly one running Zigbee2MQTT container exists;
 - it is the exact expected HA add-on container, not merely a similarly named process;
 - Docker container ID and `StartedAt` are captured;
 - current Docker-start-epoch logs show EmberZNet 9.1.1 / EZSP19;
-- the running Z2M process answers a correlated MQTT `health_check` request;
+- the running Z2M process answers a correlated MQTT `health_check` request with `status=ok` and `data.healthy=true`;
 - coordinator IEEE/PAN/extPAN/channel come from current `bridge/info`;
 - network-key plaintext stays on HA; only its SHA256 fingerprint comes from `coordinator_backup.json` inside the current owner container;
 - stopped-state hashes are captured for `configuration.yaml`, `database.db`, `coordinator_backup.json`;
@@ -166,8 +167,9 @@ The stock-host contract at this point is intentionally recorded as:
 ```text
 BTT: binary=64; stock herdsman does not rewrite it downward
 KEY: binary=12; stock herdsman does not rewrite it downward
+MULTICAST: binary=32; firmware-side membership capacity
 children: binary capacity=64; stock host normally requests runtime max=32
-NEW_BROADCAST_ENTRY_THRESHOLD: unresolved unless separately read through owner
+NEW_BROADCAST_ENTRY_THRESHOLD: separate runtime admission policy; not changed in first test
 ```
 
 Do **not** deploy the six-value P009 runtime overlay in order to manufacture a threshold readback during this first test.
@@ -281,7 +283,7 @@ Post the generated report plus both structured group observations. Never paste p
 Stop immediately on any of:
 
 - artifact/source/hash/byte-size mismatch;
-- linked evidence absent or unvalidated;
+- linked evidence absent/unvalidated or not the approved +728-B multicast32 profile;
 - wrong baseline 9.1.1/EZSP19;
 - wrong/multiple Z2M owner;
 - unexpected owner restart during a bounded gate;
