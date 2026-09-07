@@ -66,12 +66,16 @@ jobs:
             echo "docker_repo_digests=$(docker image inspect --format '{{json .RepoDigests}}' p009-silabs-builder:9.1.1)"
             docker run --rm --entrypoint /bin/sh p009-silabs-builder:9.1.1 -lc '
               set -eu
+              export PATH=/root/.silabs/slt/bin:$PATH
               printf "os_release="; tr "\n" ";" </etc/os-release; echo
-              printf "slc_version="; slc --version 2>&1 | head -1 || true
+              printf "slc_version="; slc --version 2>&1 | head -1
               printf "cmake_version="; cmake --version | head -1
               printf "ninja_version="; ninja --version
-              printf "commander_version="; commander --version 2>&1 | head -1 || true
-              printf "gcc_version="; (arm-none-eabi-gcc --version 2>/dev/null || gcc --version 2>/dev/null || true) | head -1
+              printf "commander_version="; commander --version 2>&1 | head -1
+              gcc_root="$(slt where gcc-arm-none-eabi)"
+              test -n "$gcc_root" && test -x "$gcc_root/bin/arm-none-eabi-gcc"
+              printf "gcc_root=%s\n" "$gcc_root"
+              printf "gcc_version="; "$gcc_root/bin/arm-none-eabi-gcc" --version | head -1
               /opt/venv/bin/python3 -c '"'"'import platform, importlib.metadata as m; print("python="+platform.python_version()); print("ruamel.yaml="+m.version("ruamel.yaml"))'"'"'
             '
           } | tee P009-TOOLCHAIN-EVIDENCE.txt
@@ -86,7 +90,7 @@ jobs:
           set -euo pipefail
           docker run --rm -v "$GITHUB_WORKSPACE/builder-p009:/repo" -w /repo p009-silabs-builder:9.1.1 \
             --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --output-dir outputs \
-            --output gbl --output hex --output out --repo-owner analienx --repo-hash p009b64
+            --output gbl --output hex --output out --repo-owner analienx --repo-hash p009b64m32
       - name: Capture generated build evidence
         run: |
           set -euo pipefail
