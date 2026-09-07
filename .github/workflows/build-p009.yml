@@ -50,6 +50,7 @@ jobs:
       - name: Verify and patch source
         run: |
           set -euo pipefail
+          test "$(git -C repo rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git -C builder-stock rev-parse HEAD)" = "858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
           test "$(git -C builder-p009 rev-parse HEAD)" = "858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
           python3 repo/firmware/patch_builder.py builder-p009
@@ -59,9 +60,20 @@ jobs:
           set -euo pipefail
           docker build --pull -t p009-silabs-builder:9.1.1 builder-stock
           {
+            echo "repo_commit=$GITHUB_SHA"
             echo "builder_commit=858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
             echo "docker_image_id=$(docker image inspect --format '{{.Id}}' p009-silabs-builder:9.1.1)"
-            docker run --rm --entrypoint /opt/venv/bin/python3 p009-silabs-builder:9.1.1 -c 'import platform, importlib.metadata as m; print("python="+platform.python_version()); print("ruamel.yaml="+m.version("ruamel.yaml"))'
+            echo "docker_repo_digests=$(docker image inspect --format '{{json .RepoDigests}}' p009-silabs-builder:9.1.1)"
+            docker run --rm --entrypoint /bin/sh p009-silabs-builder:9.1.1 -lc '
+              set -eu
+              printf "os_release="; tr "\n" ";" </etc/os-release; echo
+              printf "slc_version="; slc --version 2>&1 | head -1 || true
+              printf "cmake_version="; cmake --version | head -1
+              printf "ninja_version="; ninja --version
+              printf "commander_version="; commander --version 2>&1 | head -1 || true
+              printf "gcc_version="; (arm-none-eabi-gcc --version 2>/dev/null || gcc --version 2>/dev/null || true) | head -1
+              /opt/venv/bin/python3 -c '"'"'import platform, importlib.metadata as m; print("python="+platform.python_version()); print("ruamel.yaml="+m.version("ruamel.yaml"))'"'"'
+            '
           } | tee P009-TOOLCHAIN-EVIDENCE.txt
       - name: Compile stock rollback
         run: |
@@ -75,23 +87,63 @@ jobs:
           docker run --rm -v "$GITHUB_WORKSPACE/builder-p009:/repo" -w /repo p009-silabs-builder:9.1.1 \
             --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --output-dir outputs \
             --output gbl --output hex --output out --repo-owner analienx --repo-hash p009b64
+      - name: Capture generated build evidence
+        run: |
+          set -euo pipefail
+          mkdir -p bundle/source-profile bundle/generated/p009 bundle/generated/rollback-stock bundle/linked
+          cp builder-p009/src/zigbee_ncp/zigbee_ncp.slcp bundle/source-profile/P009-patched-zigbee_ncp.slcp
+          cp builder-stock/src/zigbee_ncp/zigbee_ncp.slcp bundle/source-profile/STOCK-zigbee_ncp.slcp
+          cp builder-p009/manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml bundle/source-profile/sonoff_dongle-m_zigbee_ncp.yaml
+
+          capture_generated() {
+            root="$1"; dest="$2"
+            found_map=0; found_catalog=0
+            while IFS= read -r -d '' f; do
+              rel="${f#${root}/}"
+              mkdir -p "$dest/$(dirname "$rel")"
+              cp "$f" "$dest/$rel"
+              case "$f" in
+                *.map) found_map=1 ;;
+                */sl_component_catalog.h) found_catalog=1 ;;
+              esac
+            done < <(find "$root/build" -type f \( \
+              -name '*.map' -o \
+              -name 'sl_component_catalog.h' -o \
+              -name '*_config.h' -o \
+              -name 'compile_commands.json' -o \
+              -name 'build.ninja' -o \
+              -name 'CMakeCache.txt' -o \
+              -name 'slc_project_info.json' \
+            \) -print0)
+            test "$found_map" = 1 || { echo "No linker map captured from $root/build" >&2; exit 1; }
+            test "$found_catalog" = 1 || { echo "No sl_component_catalog.h captured from $root/build" >&2; exit 1; }
+          }
+          capture_generated builder-p009 bundle/generated/p009
+          capture_generated builder-stock bundle/generated/rollback-stock
+
+          p009_out=$(find builder-p009/outputs -maxdepth 1 -type f -name '*.out' -print -quit)
+          stock_out=$(find builder-stock/outputs -maxdepth 1 -type f -name '*.out' -print -quit)
+          test -n "$p009_out" && test -n "$stock_out"
+          readelf -SW "$p009_out" > bundle/linked/P009-readelf-sections.txt
+          readelf -sW "$p009_out" > bundle/linked/P009-readelf-symbols.txt
+          readelf -SW "$stock_out" > bundle/linked/STOCK-readelf-sections.txt
+          readelf -sW "$stock_out" > bundle/linked/STOCK-readelf-symbols.txt
+          find bundle/generated -type f -print | sort > bundle/generated/GENERATED-FILES.txt
       - name: Assemble and verify bundle
         run: |
           set -euo pipefail
-          mkdir -p bundle/p009 bundle/rollback-stock bundle/effective
+          mkdir -p bundle/p009 bundle/rollback-stock
           cp builder-p009/outputs/* bundle/p009/
           cp builder-stock/outputs/* bundle/rollback-stock/
-          cp builder-p009/src/zigbee_ncp/zigbee_ncp.slcp bundle/effective/P009-effective-zigbee_ncp.slcp
-          cp builder-stock/src/zigbee_ncp/zigbee_ncp.slcp bundle/effective/STOCK-effective-zigbee_ncp.slcp
-          cp builder-p009/manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml bundle/effective/sonoff_dongle-m_zigbee_ncp.yaml
           cp repo/firmware/RESOURCE-PROFILE.md bundle/RESOURCE-PROFILE.md
           cp repo/docs/TUNING-RESEARCH.md bundle/TUNING-RESEARCH.md
           cp P009-TOOLCHAIN-EVIDENCE.txt bundle/P009-TOOLCHAIN-EVIDENCE.txt
           python3 repo/firmware/verify_build.py \
             --p009-dir bundle/p009 --stock-dir bundle/rollback-stock \
-            --p009-slcp bundle/effective/P009-effective-zigbee_ncp.slcp \
-            --stock-slcp bundle/effective/STOCK-effective-zigbee_ncp.slcp \
-            --manifest bundle/effective/sonoff_dongle-m_zigbee_ncp.yaml \
+            --p009-slcp bundle/source-profile/P009-patched-zigbee_ncp.slcp \
+            --stock-slcp bundle/source-profile/STOCK-zigbee_ncp.slcp \
+            --manifest bundle/source-profile/sonoff_dongle-m_zigbee_ncp.yaml \
+            --source-commit "$GITHUB_SHA" \
             --output bundle/P009-BUILD-MANIFEST.json
           python3 - <<'PY'
           import json
@@ -99,11 +151,16 @@ jobs:
           d = json.loads(Path("bundle/P009-BUILD-MANIFEST.json").read_text())
           p = d["p009"]["artifacts"]["gbl"]
           s = d["rollback_stock"]["artifacts"]["gbl"]
+          linked = d["linked_evidence"]
           text = (
               "P009 SONOFF Dongle-M / Dongle Max firmware bundle\n\n"
+              f"Source commit: {d['source']['repository_commit']}\n"
               f"P009 GBL: {p['name']}\nP009 bytes: {p['bytes']}\nP009 SHA256: {p['sha256']}\n\n"
               f"STOCK rollback GBL: {s['name']}\nSTOCK bytes: {s['bytes']}\nSTOCK SHA256: {s['sha256']}\n\n"
-              "Flash is NOT authorized by this file alone. Run deploy/p009_tool.py arm first.\n"
+              f"Linked .bss delta: {linked['bss_delta_bytes']} bytes\n"
+              f"Memory-manager heap reservation delta: {linked['memory_manager_heap_delta_bytes']} bytes\n\n"
+              "Artifact integrity does not prove what firmware is currently running on the NCP.\n"
+              "Flash is NOT authorized by this file alone. Run the hardened deploy/p009_tool.py arm first.\n"
           )
           Path("bundle/P009-DEPLOY.txt").write_text(text)
           PY
@@ -114,10 +171,12 @@ jobs:
           {
             echo "## P009 firmware bundle"
             echo
+            jq -r '"- **Source:** `\(.source.repository_commit)`"' bundle/P009-BUILD-MANIFEST.json
             jq -r '"- **P009:** `\(.p009.artifacts.gbl.name)` — \(.p009.artifacts.gbl.bytes) bytes — `\(.p009.artifacts.gbl.sha256)`"' bundle/P009-BUILD-MANIFEST.json
             jq -r '"- **Stock rollback:** `\(.rollback_stock.artifacts.gbl.name)` — \(.rollback_stock.artifacts.gbl.bytes) bytes — `\(.rollback_stock.artifacts.gbl.sha256)`"' bundle/P009-BUILD-MANIFEST.json
+            jq -r '"- **Linked `.bss` delta:** \(.linked_evidence.bss_delta_bytes) bytes; memory-manager reservation delta: \(.linked_evidence.memory_manager_heap_delta_bytes) bytes"' bundle/P009-BUILD-MANIFEST.json
             echo
-            echo "Both were built from the same builder checkout/toolchain container. Verify the downloaded artifact with SHA256SUMS before ARM."
+            echo "Generated configuration, linker maps, readelf evidence and toolchain provenance are bundled. Verify SHA256SUMS before ARM."
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
