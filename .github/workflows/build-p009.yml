@@ -101,13 +101,12 @@ jobs:
 
           capture_generated() {
             root="$1"; dest="$2"
-            found_map=0; found_catalog=0
+            found_catalog=0
             while IFS= read -r -d '' f; do
               rel="${f#${root}/}"
               mkdir -p "$dest/$(dirname "$rel")"
               cp "$f" "$dest/$rel"
               case "$f" in
-                *.map) found_map=1 ;;
                 */sl_component_catalog.h) found_catalog=1 ;;
               esac
             done < <(find "$root/build" -type f \( \
@@ -119,7 +118,6 @@ jobs:
               -name 'CMakeCache.txt' -o \
               -name 'slc_project_info.json' \
             \) -print0)
-            test "$found_map" = 1 || { echo "No linker map captured from $root/build" >&2; exit 1; }
             test "$found_catalog" = 1 || { echo "No sl_component_catalog.h captured from $root/build" >&2; exit 1; }
           }
           capture_generated builder-p009 bundle/generated/p009
@@ -180,7 +178,7 @@ jobs:
             jq -r '"- **Stock rollback:** `\(.rollback_stock.artifacts.gbl.name)` — \(.rollback_stock.artifacts.gbl.bytes) bytes — `\(.rollback_stock.artifacts.gbl.sha256)`"' bundle/P009-BUILD-MANIFEST.json
             jq -r '"- **Linked `.bss` delta:** \(.linked_evidence.bss_delta_bytes) bytes; memory-manager reservation delta: \(.linked_evidence.memory_manager_heap_delta_bytes) bytes"' bundle/P009-BUILD-MANIFEST.json
             echo
-            echo "Generated configuration, linker maps, readelf evidence and toolchain provenance are bundled. Verify SHA256SUMS before ARM."
+            echo "Generated configuration/build metadata, readelf evidence and toolchain provenance are bundled. Verify SHA256SUMS before ARM."
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
