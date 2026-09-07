@@ -10,13 +10,16 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
-if str(DEPLOY) not in sys.path:
-    sys.path.insert(0, str(DEPLOY))
+FIRMWARE = ROOT / "firmware"
+for path in (DEPLOY, FIRMWARE):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from decode_ncp_counters import decode_line, summary
 from p009_accept import parse_json_output
 from p009_common import appended_logs, compare_identity, configure_remote, remote_argv, safe_identity_from_backup_doc
 from p009_deploy import PHASE_ARMED, PHASE_FLASH, PHASE_IDENTITY, cmd_confirm_flash, require_phase, runtime_readbacks, validate_session_target
+from verify_build import extract_eusart_rx_buffer
 
 
 class P009Tests(unittest.TestCase):
@@ -151,6 +154,40 @@ class P009Tests(unittest.TestCase):
         self.assertEqual(report["totals"]["BROADCAST_TABLE_FULL"], 5)
         self.assertEqual(report["max_per_interval"]["BROADCAST_TABLE_FULL"], 3)
         self.assertEqual(report["nonzero_intervals"]["BROADCAST_TABLE_FULL"], 2)
+
+    def test_rx_verifier_accepts_multiline_condition(self):
+        text = """- name: SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE
+  value: 512
+  condition:
+    - iostream_eusart
+"""
+        self.assertEqual(extract_eusart_rx_buffer(text), 512)
+
+    def test_rx_verifier_accepts_inline_condition(self):
+        text = """- name: SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE
+  value: '512'
+  condition: [\"iostream_eusart\"]
+"""
+        self.assertEqual(extract_eusart_rx_buffer(text), 512)
+
+    def test_rx_verifier_accepts_scalar_condition(self):
+        text = """- name: SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE
+  value: 512
+  condition: iostream_eusart
+"""
+        self.assertEqual(extract_eusart_rx_buffer(text), 512)
+
+    def test_rx_verifier_rejects_ambiguous_eusart_entries(self):
+        text = """- name: SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE
+  value: 128
+  condition: [iostream_eusart]
+- name: SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE
+  value: 512
+  condition:
+    - iostream_eusart
+"""
+        with self.assertRaises(SystemExit):
+            extract_eusart_rx_buffer(text)
 
 
 if __name__ == "__main__":
