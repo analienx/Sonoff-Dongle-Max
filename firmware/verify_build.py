@@ -20,7 +20,6 @@ SDK = "2026.6.1"
 EMBER = "9.1.1"
 DEVICE = "EFR32MG24A420F1536IM48"
 COMMON_PROFILE = {
-    "SL_ZIGBEE_MULTICAST_TABLE_SIZE": 26,
     "SL_ZIGBEE_DISCOVERY_TABLE_SIZE": 16,
     "SL_ZIGBEE_NEIGHBOR_TABLE_SIZE": 26,
     "SL_ZIGBEE_BINDING_TABLE_SIZE": 32,
@@ -35,20 +34,23 @@ P009_ONLY = {
     "SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE": 512,
     "SL_ZIGBEE_BROADCAST_TABLE_SIZE": 64,
     "SL_ZIGBEE_KEY_TABLE_SIZE": 12,
+    "SL_ZIGBEE_MULTICAST_TABLE_SIZE": 32,
 }
 STOCK_ONLY = {
     "SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE": 128,
     "SL_ZIGBEE_BROADCAST_TABLE_SIZE": 30,
     "SL_ZIGBEE_KEY_TABLE_SIZE": 1,
+    "SL_ZIGBEE_MULTICAST_TABLE_SIZE": 26,
 }
+PROFILE_NAMES = tuple(dict.fromkeys((*COMMON_PROFILE, *P009_ONLY, *STOCK_ONLY)))
 
-# These are linked-image facts independently measured on the approved pinned
-# 2026.6.1/GCC14.2.1 build. They intentionally catch "source says X but ELF
-# contains Y" regressions. Future deliberate toolchain changes must re-audit
-# and update these assertions explicitly.
+# These are linked-image facts for the pinned 2026.6.1/GCC14.2.1 build. The
+# multicast 26->32 promotion adds six 4-byte entries (+24 B), taking the prior
+# +704 B P009 delta to +728 B. CI intentionally fails if the linked image does
+# not match these exact expectations.
 LINKED_SECTION_EXPECTED = {
     "stock": {".bss": 22_284, ".memory_manager_heap": 229_896},
-    "p009": {".bss": 22_988, ".memory_manager_heap": 229_896},
+    "p009": {".bss": 23_012, ".memory_manager_heap": 229_896},
 }
 LINKED_SYMBOL_EXPECTED = {
     "stock": {
@@ -66,7 +68,7 @@ LINKED_SYMBOL_EXPECTED = {
         "sli_zigbee_broadcast_table_data": 512,
         "sli_zigbee_incoming_aps_frame_counters": 52,
         "sli_zigbee_retry_queue": 320,
-        "sli_zigbee_multicast_table": 104,
+        "sli_zigbee_multicast_table": 128,
         "sli_zigbee_source_route_table_data": 1016,
         "sli_zigbee_route_table": 2040,
         "sli_zigbee_child_table_data": 1560,
@@ -124,7 +126,9 @@ def profile(slcp: Path) -> dict[str, int | str]:
         "SL_ZIGBEE_BROADCAST_TABLE_SIZE",
         "SL_ZIGBEE_KEY_TABLE_SIZE",
     }
-    for name in (*COMMON_PROFILE, "SL_ZIGBEE_BROADCAST_TABLE_SIZE", "SL_ZIGBEE_KEY_TABLE_SIZE"):
+    for name in PROFILE_NAMES:
+        if name == "SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE":
+            continue
         out[name] = extract_value(text, name, xg24=name not in global_names)
     out["SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE"] = extract_eusart_rx_buffer(text)
     heap_pat = r"- name: SL_ZIGBEE_PACKET_BUFFER_HEAP_SIZE\s*\n\s+value: (SL_ZIGBEE_HUGE_PACKET_BUFFER_HEAP)\s*\n\s+condition: \[\"device_generic_family_efr32xg24\"\]"
@@ -140,7 +144,8 @@ def validate_profile(actual: dict[str, int | str], expected_delta: dict[str, int
     expected["SL_ZIGBEE_PACKET_BUFFER_HEAP_SIZE"] = "SL_ZIGBEE_HUGE_PACKET_BUFFER_HEAP"
     if actual != expected:
         missing = {k: v for k, v in expected.items() if actual.get(k) != v}
-        die(f"profile mismatch: {missing}")
+        unexpected = {k: v for k, v in actual.items() if k not in expected}
+        die(f"profile mismatch: expected_differences={missing}, unexpected={unexpected}")
 
 
 def validate_manifest(path: Path) -> dict[str, object]:
@@ -186,7 +191,6 @@ def readelf_symbols(path: Path) -> dict[str, int]:
     # Size is decimal in GNU readelf symbol output.
     rx = re.compile(r"^\s*\d+:\s+[0-9a-fA-F]+\s+(\d+)\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+?)\s*$", re.MULTILINE)
     for size, name in rx.findall(_readelf(path, "-sW")):
-        # Strip a possible ELF version suffix while preserving ordinary names.
         clean = name.split("@", 1)[0]
         if clean:
             out[clean] = int(size)
@@ -212,9 +216,10 @@ def linked_evidence(stock_out: Path, p009_out: Path) -> dict[str, object]:
         report["symbols"][variant] = symbol_actual
     s_bss = report["sections"]["stock"][".bss"]
     p_bss = report["sections"]["p009"][".bss"]
-    if p_bss - s_bss != 704:
-        die(f"linked .bss delta must be 704 bytes, got {p_bss - s_bss}")
-    report["bss_delta_bytes"] = 704
+    expected_delta = 728
+    if p_bss - s_bss != expected_delta:
+        die(f"linked .bss delta must be {expected_delta} bytes, got {p_bss - s_bss}")
+    report["bss_delta_bytes"] = expected_delta
     report["memory_manager_heap_delta_bytes"] = 0
     report["validated"] = True
     return report
