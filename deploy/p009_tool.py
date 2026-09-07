@@ -54,7 +54,15 @@ def parser() -> argparse.ArgumentParser:
 
     fn = sub.add_parser("finalize")
     fn.add_argument("--session", type=Path, required=True)
-    fn.add_argument("--group-evidence", action="append", default=[], help="repeat exactly twice; brief description of verified representative group command")
+    fn.add_argument(
+        "--group-evidence",
+        action="append",
+        default=[],
+        help=(
+            'repeat exactly twice; JSON object with non-empty string fields '
+            'group, command, timestamp, command_result, physical_result'
+        ),
+    )
     fn.add_argument("--confirm", required=True)
     fn.set_defaults(func=cmd_finalize)
 
