@@ -43,9 +43,9 @@ from p009_deploy import (
 from verify_build import COMMON_PROFILE, P009_ONLY, STOCK_ONLY, linked_evidence, profile, validate_profile
 
 
-def synthetic_slcp(rx_buffer: int, broadcast_table: int, key_table: int) -> str:
+def synthetic_slcp(rx_buffer: int, broadcast_table: int, key_table: int, multicast_table: int = 26) -> str:
     entries = [
-        ("SL_ZIGBEE_MULTICAST_TABLE_SIZE", 26, None),
+        ("SL_ZIGBEE_MULTICAST_TABLE_SIZE", multicast_table, None),
         ("SL_ZIGBEE_NEIGHBOR_TABLE_SIZE", 26, None),
         ("SL_ZIGBEE_BINDING_TABLE_SIZE", 32, None),
         ("SL_ZIGBEE_BROADCAST_TABLE_SIZE", broadcast_table, None),
@@ -106,7 +106,7 @@ def synthetic_build_manifest() -> dict[str, object]:
         "p009": {"profile": p_profile, "artifacts": {"gbl": {"name": "p.gbl", "sha256": "1" * 64, "bytes": 100}}},
         "rollback_stock": {"profile": s_profile, "artifacts": {"gbl": {"name": "s.gbl", "sha256": "2" * 64, "bytes": 100}}},
         "allowed_profile_differences": sorted(P009_ONLY),
-        "linked_evidence": {"validated": True, "bss_delta_bytes": 704, "memory_manager_heap_delta_bytes": 0},
+        "linked_evidence": {"validated": True, "bss_delta_bytes": 728, "memory_manager_heap_delta_bytes": 0},
     }
 
 
@@ -295,6 +295,7 @@ class P009Tests(unittest.TestCase):
             path.write_text(json.dumps(synthetic_build_manifest()), encoding="utf-8")
             got = load_build_manifest(path)
             self.assertEqual(got["p009"]["profile"]["SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE"], 512)
+            self.assertEqual(got["p009"]["profile"]["SL_ZIGBEE_MULTICAST_TABLE_SIZE"], 32)
 
     def test_hardened_manifest_rejects_missing_rx512_or_linked_evidence(self):
         with tempfile.TemporaryDirectory() as td:
@@ -313,11 +314,12 @@ class P009Tests(unittest.TestCase):
     def test_verify_build_profile_extraction_matches_p009_delta(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "p009.slcp"
-            path.write_text(synthetic_slcp(rx_buffer=512, broadcast_table=64, key_table=12), encoding="utf-8")
+            path.write_text(synthetic_slcp(rx_buffer=512, broadcast_table=64, key_table=12, multicast_table=32), encoding="utf-8")
             got = profile(path)
         validate_profile(got, P009_ONLY)
         self.assertEqual(got["SL_ZIGBEE_BROADCAST_TABLE_SIZE"], 64)
         self.assertEqual(got["SL_ZIGBEE_KEY_TABLE_SIZE"], 12)
+        self.assertEqual(got["SL_ZIGBEE_MULTICAST_TABLE_SIZE"], 32)
         self.assertEqual(got["SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE"], 512)
         self.assertEqual(got["SL_ZIGBEE_PACKET_BUFFER_HEAP_SIZE"], "SL_ZIGBEE_HUGE_PACKET_BUFFER_HEAP")
         for name, value in COMMON_PROFILE.items():
@@ -326,19 +328,20 @@ class P009Tests(unittest.TestCase):
     def test_verify_build_profile_extraction_matches_stock_delta(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "stock.slcp"
-            path.write_text(synthetic_slcp(rx_buffer=128, broadcast_table=30, key_table=1), encoding="utf-8")
+            path.write_text(synthetic_slcp(rx_buffer=128, broadcast_table=30, key_table=1, multicast_table=26), encoding="utf-8")
             got = profile(path)
         validate_profile(got, STOCK_ONLY)
+        self.assertEqual(got["SL_ZIGBEE_MULTICAST_TABLE_SIZE"], 26)
 
     def test_verify_build_profile_rejects_wrong_delta(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "bad.slcp"
-            path.write_text(synthetic_slcp(rx_buffer=128, broadcast_table=64, key_table=1), encoding="utf-8")
+            path.write_text(synthetic_slcp(rx_buffer=128, broadcast_table=64, key_table=1, multicast_table=26), encoding="utf-8")
             got = profile(path)
         with self.assertRaises(SystemExit):
             validate_profile(got, STOCK_ONLY)
 
-    def test_linked_elf_contract_checks_sections_symbols_and_704_delta(self):
+    def test_linked_elf_contract_checks_sections_symbols_and_728_delta(self):
         sizes = {
             "stock": {
                 "rx_buffer_vcom": 128,
@@ -355,7 +358,7 @@ class P009Tests(unittest.TestCase):
                 "sli_zigbee_broadcast_table_data": 512,
                 "sli_zigbee_incoming_aps_frame_counters": 52,
                 "sli_zigbee_retry_queue": 320,
-                "sli_zigbee_multicast_table": 104,
+                "sli_zigbee_multicast_table": 128,
                 "sli_zigbee_source_route_table_data": 1016,
                 "sli_zigbee_route_table": 2040,
                 "sli_zigbee_child_table_data": 1560,
@@ -365,7 +368,7 @@ class P009Tests(unittest.TestCase):
         def fake_readelf(path: Path, flag: str) -> str:
             variant = "stock" if "stock" in path.name else "p009"
             if flag == "-SW":
-                bss = "00570c" if variant == "stock" else "0059cc"
+                bss = "00570c" if variant == "stock" else "0059e4"
                 return (
                     f"  [ 1] .bss NOBITS 20001008 001008 {bss} 00 WA 0 0 8\n"
                     "  [ 2] .memory_manager_heap NOBITS 20007df8 000000 038208 00 WA 0 0 8\n"
@@ -378,8 +381,9 @@ class P009Tests(unittest.TestCase):
         with patch("verify_build._readelf", side_effect=fake_readelf):
             report = linked_evidence(Path("stock.out"), Path("p009.out"))
         self.assertTrue(report["validated"])
-        self.assertEqual(report["bss_delta_bytes"], 704)
+        self.assertEqual(report["bss_delta_bytes"], 728)
         self.assertEqual(report["symbols"]["p009"]["rx_buffer_vcom"], 512)
+        self.assertEqual(report["symbols"]["p009"]["sli_zigbee_multicast_table"], 128)
 
     def test_ncp_counter_decoder_extracts_pressure_signals(self):
         values = [0] * 42
