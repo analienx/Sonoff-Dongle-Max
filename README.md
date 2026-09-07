@@ -135,7 +135,7 @@ This repository deliberately separates four different claims:
 
 A copied SLCP is not called “effective configuration”. A manually acknowledged GBL SHA is not called device-side firmware attestation.
 
-The hardened build artifact contains source inputs, generated configuration, linker maps, `readelf` evidence, toolchain evidence, linked-object assertions and a schema-versioned build manifest.
+The hardened build artifact contains source inputs, generated configuration/build metadata, `readelf` section/symbol reports, toolchain evidence, linked-object assertions and a schema-versioned build manifest. A linker `.map` is archived only if the pinned builder happens to emit one; it is not required because the linked ELF is the authoritative evidence.
 
 ## Controlled deployment
 
