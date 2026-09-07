@@ -51,13 +51,32 @@ def stop_session(path: Path, session: dict[str, object], reason: str, host: str,
     save_session(path, session)
 
 
+def require_current_stack_version(snap: dict[str, object], label: str) -> None:
+    version_blob = "\n".join(snap.get("version_lines") or [])
+    if not re.search(r"9\.1\.1", version_blob):
+        raise RuntimeError(f"{label}: current Docker start epoch logs do not show EmberZNet 9.1.1")
+    if not re.search(r"\bEZSP\b.*\b19\b|\bezsp\b.*\b19\b|transportrev[^0-9]*19", version_blob, re.IGNORECASE):
+        raise RuntimeError(f"{label}: current Docker start epoch logs do not show EZSP 19")
+
+
+def require_manifest_repo_binding(manifest: dict[str, object]) -> str:
+    expected = str((manifest.get("source") or {}).get("repository_commit") or "")
+    current = repo_commit()
+    if current is None:
+        die("cannot determine local repository commit; hardened ARM requires an exact checked-out source commit")
+    if current != expected:
+        die(f"local repository commit {current} does not match build manifest source commit {expected}")
+    return current
+
+
 def cmd_snapshot(args: argparse.Namespace) -> None:
     snap = snapshot(args.host, args.addon, args.z2m_dir)
     validate_identity(snap["identity"])
+    require_current_stack_version(snap, "snapshot")
     out = args.output or Path(f"p009-snapshot-{utcstamp()}.json")
     write_json(out, snap)
     print(f"P009: snapshot PASS -> {out}")
-    print(json.dumps(snap["identity"], indent=2, sort_keys=True))
+    print(json.dumps({"identity": snap["identity"], "identity_evidence": snap.get("identity_evidence")}, indent=2, sort_keys=True))
 
 
 def cmd_arm(args: argparse.Namespace) -> None:
@@ -67,26 +86,28 @@ def cmd_arm(args: argparse.Namespace) -> None:
         die(f"session already exists: {args.session}; use --replace-session only for a deliberately new deployment")
     verify_bundle_checksums(args.bundle_root)
     manifest = load_build_manifest(args.build_manifest)
+    source_commit = require_manifest_repo_binding(manifest)
     p009_gbl = find_gbl(args.bundle_root, manifest, "p009")
     stock_gbl = find_gbl(args.bundle_root, manifest, "stock")
 
     pre = snapshot(args.host, args.addon, args.z2m_dir)
     validate_identity(pre["identity"])
-    version_blob = "\n".join(pre.get("version_lines") or [])
-    if not re.search(r"9\.1\.1", version_blob):
-        die("preflight logs do not show the approved EmberZNet 9.1.1 baseline")
-    if not re.search(r"\bEZSP\b.*\b19\b|\bezsp\b.*\b19\b", version_blob, re.IGNORECASE):
-        die("preflight logs do not show the approved EZSP 19 baseline")
+    try:
+        require_current_stack_version(pre, "preflight")
+    except RuntimeError as exc:
+        die(str(exc))
     state = addon_state(pre["addon"])
     if state not in {"started", "running"}:
         die(f"expected active stock Z2M before arm, got state={state}")
-    owner = require_single_z2m_owner(args.host)
+    owner = require_single_z2m_owner(args.host, args.addon)
 
     session = {
-        "schema": 2,
+        "schema": 3,
         "phase": PHASE_ARMING,
         "created_utc": datetime.now(timezone.utc).isoformat(),
-        "repo_commit": repo_commit(),
+        "repo_commit": source_commit,
+        "build_manifest_sha256": sha256_file(args.build_manifest),
+        "build_source_commit": source_commit,
         "host": args.host,
         "addon": args.addon,
         "z2m_dir": args.z2m_dir,
@@ -96,14 +117,22 @@ def cmd_arm(args: argparse.Namespace) -> None:
         "p009_gbl": {"path": str(p009_gbl.resolve()), "name": p009_gbl.name, "bytes": p009_gbl.stat().st_size, "sha256": sha256_file(p009_gbl)},
         "rollback_stock_gbl": {"path": str(stock_gbl.resolve()), "name": stock_gbl.name, "bytes": stock_gbl.stat().st_size, "sha256": sha256_file(stock_gbl)},
         "build_manifest": str(args.build_manifest.resolve()),
+        "binary_contract": {
+            "p009": (manifest.get("p009") or {}).get("profile"),
+            "rollback_stock": (manifest.get("rollback_stock") or {}).get("profile"),
+            "linked_evidence": manifest.get("linked_evidence"),
+        },
     }
     save_session(args.session, session)
 
-    print(f"P009: single Z2M owner confirmed: {owner}")
+    print(f"P009: exact HA add-on owner confirmed: {owner}")
     print("P009: stopping Zigbee2MQTT for stopped-state backup...")
     try:
         remote_exec(args.host, f"ha addons stop {shlex.quote(args.addon)}")
         wait_state(args.host, args.addon, {"stopped"})
+        residual = running_z2m_containers(args.host)
+        if residual:
+            raise RuntimeError(f"Zigbee2MQTT container still running after add-on stop: {residual}")
         stopped_hashes = remote_hashes(args.host, args.z2m_dir)
         required_stopped = {"configuration.yaml", "database.db", "coordinator_backup.json"}
         if not required_stopped.issubset(stopped_hashes):
@@ -147,7 +176,12 @@ def cmd_confirm_flash(args: argparse.Namespace) -> None:
         die("--observed-sha256 must be a 64-character SHA256")
     if observed != expected:
         die(f"flashed GBL hash acknowledgment mismatch: expected {expected}, got {observed}")
-    session["manual_flash"] = {"confirmed_utc": datetime.now(timezone.utc).isoformat(), "sha256": observed, "webui_note": args.webui_note.strip()[:500]}
+    session["manual_flash"] = {
+        "confirmed_utc": datetime.now(timezone.utc).isoformat(),
+        "sha256": observed,
+        "webui_note": args.webui_note.strip()[:500],
+        "proof_scope": "human acknowledgment of uploaded artifact; not device-side firmware attestation",
+    }
     session["phase"] = PHASE_FLASH
     save_session(args.session, session)
     print(f"P009: manual flash acknowledged for exact ARM-verified GBL -> phase={PHASE_FLASH}")
@@ -183,34 +217,69 @@ def cmd_postflash(args: argparse.Namespace) -> None:
     session = load_json(args.session)
     require_phase(session, PHASE_FLASH)
     validate_session_target(session, args)
-    info = addon_info(args.host, args.addon)
-    if addon_state(info) not in {"started", "running"}:
+    post: dict[str, object] | None = None
+    readbacks: dict[str, dict[str, object]] = {}
+    try:
+        info = addon_info(args.host, args.addon)
+        if addon_state(info) not in {"stopped"}:
+            raise RuntimeError(f"postflash expected the armed add-on to still be stopped before controlled start, got {addon_state(info)}")
         remote_exec(args.host, f"ha addons start {shlex.quote(args.addon)}")
         wait_state(args.host, args.addon, {"started", "running"}, timeout=120)
-    time.sleep(args.settle_seconds)
-    try:
+        time.sleep(args.settle_seconds)
         post = snapshot(args.host, args.addon, args.z2m_dir)
         validate_identity(post["identity"])
+        require_current_stack_version(post, "post-flash")
         diffs = compare_identity(session["pre"], post)
-        version_blob = "\n".join(post.get("version_lines") or [])
         if diffs:
             raise RuntimeError("network identity changed: " + "; ".join(diffs))
-        if not re.search(r"9\.1\.1", version_blob):
-            raise RuntimeError("post-flash logs do not show EmberZNet 9.1.1")
-        if not re.search(r"\bEZSP\b.*\b19\b|\bezsp\b.*\b19\b", version_blob, re.IGNORECASE):
-            raise RuntimeError("post-flash logs do not show EZSP 19")
+        pre_owner = ((session.get("pre") or {}).get("identity_evidence") or {}).get("owner") or {}
+        post_owner = (post.get("identity_evidence") or {}).get("owner") or {}
+        if pre_owner.get("started_at") == post_owner.get("started_at"):
+            raise RuntimeError("post-flash evidence reused the same Docker start epoch as pre-arm; current restart freshness is not proved")
         readbacks = runtime_readbacks(post.get("version_lines") or [])
         required = {"BROADCAST_TABLE_SIZE", "NEW_BROADCAST_ENTRY_THRESHOLD", "RETRY_QUEUE_SIZE", "MTORR_FLOW_CONTROL", "SUPPORTED_NETWORKS", "SEND_MULTICASTS_TO_SLEEPY_ADDRESS"}
         if args.require_runtime and set(readbacks) != required:
             raise RuntimeError(f"runtime overlay required but complete six-value readback was not found: {sorted(readbacks)}")
+        stopped_hashes = ((session.get("stopped_state_backup") or {}).get("file_sha256") or {})
+        current_hashes = post.get("remote_sha256") or {}
+        if stopped_hashes.get("configuration.yaml") != current_hashes.get("configuration.yaml"):
+            raise RuntimeError("configuration.yaml changed across firmware-only deployment")
     except BaseException as exc:
-        stop_session(args.session, session, str(exc), args.host, args.addon, stop_addon=True)
-        die(f"post-flash gate failed; Z2M stopped and session marked STOPPED: {exc}")
-    session["postflash"] = {"snapshot": post, "runtime_readbacks": readbacks, "runtime_required": args.require_runtime}
+        if post is not None:
+            session["postflash_partial"] = post
+        stop_session(args.session, session, f"post-flash gate failed: {exc}", args.host, args.addon, stop_addon=True)
+        die(f"post-flash gate failed; evidence persisted, Z2M stopped and session marked STOPPED: {exc}")
+    session["postflash"] = {
+        "snapshot": post,
+        "runtime_readbacks": readbacks,
+        "runtime_required": args.require_runtime,
+        "stock_runtime_contract": {
+            "BROADCAST_TABLE_SIZE": "binary=64; stock herdsman does not rewrite; no universal owner-side readback",
+            "KEY_TABLE_SIZE": "binary=12; stock herdsman does not rewrite; no universal owner-side readback",
+            "MAX_END_DEVICE_CHILDREN": "binary capacity=64; stock herdsman default policy attempts runtime value 32",
+            "NEW_BROADCAST_ENTRY_THRESHOLD": "effective value unresolved under stock host; do not assume 48",
+        },
+        "firmware_identity_scope": "current owner proves generic EmberZNet 9.1.1/EZSP19 plus unchanged network identity; exact P009 binary remains artifact/hash acknowledgment until XNCP identity variant exists",
+    }
     session["phase"] = PHASE_IDENTITY
     save_session(args.session, session)
-    print(f"P009: POSTFLASH IDENTITY PASS -> phase={PHASE_IDENTITY}")
-    print("No P009 runtime-overlay marker is expected for the firmware-only/stock-Z2M first test." if not readbacks else f"P009 runtime overlay readbacks detected: {len(readbacks)}/6")
+    print(f"P009: POSTFLASH CURRENT-SESSION IDENTITY PASS -> phase={PHASE_IDENTITY}")
+    print("Exact custom-firmware on-device identity is NOT claimed by this gate; P009 artifact hash is a separate manual acknowledgment.")
+
+
+def parse_group_evidence(text: str) -> dict[str, object]:
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as exc:
+        die(f"--group-evidence must be a JSON object: {exc}")
+    if not isinstance(doc, dict):
+        die("--group-evidence must be a JSON object")
+    required = ("group", "command", "timestamp", "command_result", "physical_result")
+    missing = [k for k in required if not isinstance(doc.get(k), str) or not str(doc.get(k)).strip()]
+    if missing:
+        die(f"group evidence missing non-empty string fields: {missing}")
+    doc = {k: str(v).strip()[:1000] if isinstance(v, str) else v for k, v in doc.items()}
+    return doc
 
 
 def cmd_finalize(args: argparse.Namespace) -> None:
@@ -219,18 +288,24 @@ def cmd_finalize(args: argparse.Namespace) -> None:
     session = load_json(args.session)
     require_phase(session, PHASE_AUTO)
     validate_session_target(session, args)
-    if len(args.group_evidence) != 2 or any(not x.strip() for x in args.group_evidence):
-        die("finalize requires exactly two non-empty --group-evidence values")
+    if len(args.group_evidence) != 2:
+        die("finalize requires exactly two --group-evidence JSON objects")
+    groups = [parse_group_evidence(x) for x in args.group_evidence]
     try:
         final_snapshot = snapshot(args.host, args.addon, args.z2m_dir)
         validate_identity(final_snapshot["identity"])
+        require_current_stack_version(final_snapshot, "finalize")
         diffs = compare_identity(session["pre"], final_snapshot)
         if diffs:
             raise RuntimeError("final identity changed: " + "; ".join(diffs))
+        post_owner = ((((session.get("postflash") or {}).get("snapshot") or {}).get("identity_evidence") or {}).get("owner") or {})
+        final_owner = (final_snapshot.get("identity_evidence") or {}).get("owner") or {}
+        if (post_owner.get("container_id"), post_owner.get("started_at")) != (final_owner.get("container_id"), final_owner.get("started_at")):
+            raise RuntimeError(f"Z2M owner/start epoch changed between postflash and finalize: post={post_owner} final={final_owner}")
     except BaseException as exc:
         stop_session(args.session, session, f"finalization safety gate failed: {exc}", args.host, args.addon, stop_addon=True)
         die(f"finalize STOP; Z2M stopped and session marked STOPPED: {exc}")
-    session["group_command_evidence"] = [x.strip() for x in args.group_evidence]
+    session["group_command_evidence"] = groups
     session["final_snapshot"] = final_snapshot
     session["phase"] = PHASE_ACCEPTED
     session["accepted_utc"] = datetime.now(timezone.utc).isoformat()
@@ -263,7 +338,7 @@ def cmd_restore_data(args: argparse.Namespace) -> None:
             raise RuntimeError(f"restored stopped-state hashes differ: expected={expected_files} actual={restored_hashes}")
         remote_exec(args.host, f"ha addons start {shlex.quote(args.addon)}")
         wait_state(args.host, args.addon, {"started", "running"}, timeout=120)
-        require_single_z2m_owner(args.host)
+        require_single_z2m_owner(args.host, args.addon)
     except BaseException as exc:
         session["phase"] = PHASE_STOPPED
         session["stop_reason"] = f"data restore failed/interrupted: {exc}"
@@ -282,11 +357,11 @@ def cmd_status(args: argparse.Namespace) -> None:
     next_step = {
         PHASE_ARMING: "Interrupted/in-progress ARM state. Do not continue until reviewed.",
         PHASE_ARMED: "Flash exact P009 GBL via WebUI, then confirm-flash with its exact SHA256.",
-        PHASE_FLASH: "Run postflash identity gate.",
+        PHASE_FLASH: "Run postflash current-session identity gate.",
         PHASE_IDENTITY: "Run bounded acceptance.",
-        PHASE_AUTO: "Run exactly two representative group commands, then finalize with two evidence strings.",
+        PHASE_AUTO: "Run exactly two representative group commands, then finalize with two structured evidence JSON objects.",
         PHASE_ACCEPTED: "Done. Stop testing.",
-        PHASE_STOPPED: "Do not continue. Review stop_reason and decide rollback/runtime/MG26.",
+        PHASE_STOPPED: "Do not continue. Review stop_reason and decide rollback/diagnostic next step.",
         PHASE_ROLLED_BACK_DATA: "Verify coordinator firmware/identity before normal operation.",
     }.get(phase, "Unknown phase; review session JSON.")
     print(json.dumps({"phase": phase, "next": next_step, "stop_reason": session.get("stop_reason")}, indent=2))
@@ -300,21 +375,22 @@ def cmd_report(args: argparse.Namespace) -> None:
     can = a.get("active") or {}
     per = a.get("permit") or {}
     results = per.get("results") or []
-    permit_ok = sum(1 for r in results if isinstance(r, dict) and r.get("status") == "ok")
-    busy = sum(len(r.get("busy") or []) for r in results if isinstance(r, dict))
+    permit_ok = sum(1 for r in results if isinstance(r, dict) and r.get("ok") is True)
+    pressure = sum(len(r.get("pressure") or []) for r in results if isinstance(r, dict))
     groups = len(s.get("group_command_evidence") or [])
     print(f"PHASE: {s.get('phase')}")
+    print(f"SOURCE COMMIT: {s.get('build_source_commit')}")
     print(f"P009 GBL: {p.get('name')} | {p.get('bytes')} | {p.get('sha256')}")
     print(f"STOCK GBL: {st.get('name')} | {st.get('bytes')} | {st.get('sha256')}")
-    print(f"MANUAL FLASH ACK: {'YES' if s.get('manual_flash') else 'NO'}")
-    print(f"POSTFLASH IDENTITY: {'PASS' if s.get('postflash') else 'NOT RUN'}")
-    print(f"ACTIVE CANARY: {can.get('successes', 0)}/{can.get('total', 16)}")
-    print(f"PERMIT JOIN ALL: {permit_ok}/{len(results) or 5} OK | BUSY={busy}")
+    print(f"MANUAL FLASH ACK: {'YES (artifact acknowledgment only)' if s.get('manual_flash') else 'NO'}")
+    print(f"POSTFLASH CURRENT SESSION IDENTITY: {'PASS' if s.get('postflash') else 'NOT RUN'}")
+    print(f"ACTIVE CANARY: {can.get('successes', 0)}/{can.get('expected', 16)} | completed={can.get('completed', 0)}")
+    print(f"PERMIT JOIN ALL: {permit_ok}/{len(results) or 5} OK | pressure-signatures={pressure} | cleanup={((per.get('cleanup') or {}).get('ok'))}")
     print(f"GROUP COMMANDS: {groups}/2")
-    print(f"NCP/ASH RESET DURING GATE: {len(a.get('fatal_log_lines') or [])}")
+    print(f"HARD LOG SIGNATURES DURING GATE: {len(a.get('hard_log_lines') or [])}")
     if s.get("phase") == PHASE_STOPPED:
         print(f"FINAL: STOPPED ON {s.get('stop_reason')}")
     elif s.get("phase") == PHASE_ACCEPTED:
-        print("FINAL: PASS")
+        print("FINAL: PASS (bounded operational acceptance, not long-term reliability proof)")
     else:
         print("FINAL: INCOMPLETE")
