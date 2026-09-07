@@ -1,36 +1,50 @@
 # P010 diagnostic-only BUSY pressure overlay
 
-This overlay is **not a tuning profile**. It exists only to identify which Ember/NCP resource is saturated if P009 still produces a real `BUSY` send failure.
+This overlay is **not a tuning profile**. It exists only to identify which Ember/NCP resource is under pressure if the firmware-only P009 test still produces a real `BUSY` send failure.
 
-It is pinned to zigbee-herdsman 10.9.1 commit:
+Pinned zigbee-herdsman 10.9.1 commit:
 
 ```text
 0968f979d558874b17396c96b66382d4236bbdcd
 ```
 
-## Behavior
+## Trigger paths
 
-On `SLStatus.BUSY` from exactly these production-relevant paths:
+Only `SLStatus.BUSY` returned from:
 
 - ZCL group / multicast;
 - ZCL broadcast;
-- ZDO broadcast;
+- ZDO broadcast.
 
-it performs one best-effort call to the existing read-only:
+## Timing contract
+
+The original BUSY path **does not await diagnostics**. It schedules a read-only snapshot and immediately throws the same original send error.
+
+The snapshot:
+
+- is queued through the adapter owner rather than opening a second NCP client;
+- uses `ezspReadCounters()` only;
+- is single-flight;
+- coalesces repeated triggers for five seconds;
+- logs its own read latency;
+- never retries the failed send;
+- never clears counters;
+- never changes routing, configuration or queue sizes.
+
+This matters because the older P010 draft awaited `ezspReadCounters()` before propagating BUSY, which changed the timing of the failure being diagnosed.
+
+## Evidence
+
+Logs are emitted under `[P010 PRESSURE]` with one of:
 
 ```text
-ezspReadCounters()
+snapshot=ok
+snapshot=failed
+snapshot=queue-failed
+snapshot=coalesced
 ```
 
-and logs selected values under:
-
-```text
-[P010 PRESSURE]
-```
-
-It does **not** call `ezspReadAndClearCounters()`, does not retry the failed send and does not modify configuration, routing or queue sizing.
-
-Selected counters:
+A successful snapshot includes:
 
 ```text
 ASH_OVERFLOW_ERROR
@@ -44,10 +58,10 @@ BROADCAST_TABLE_FULL
 ADDRESS_CONFLICT_SENT
 ```
 
-The diagnostic read is wrapped in its own try/catch. Failure to retrieve counters is logged but the original BUSY error still proceeds unchanged.
+Interpret these counters against the last known hourly `ezspReadAndClearCounters()` boundary or NCP reset. A zero delta does **not** by itself prove that the broadcast-table local-admission threshold was not responsible for a BUSY.
 
 ## Deployment boundary
 
-Do not deploy this for the first P009 firmware-only acceptance run. Use it only if P009 still produces a residual BUSY and the existing hourly `[NCP COUNTERS]` data is not temporally precise enough to attribute that event.
+Do not deploy P010 during the first P009 firmware-only acceptance. Use it only after a residual BUSY when the supervisor specifically wants event-adjacent counter evidence.
 
-This artifact is deliberately separate from the P009 EZSP policy overlay so observability and tuning cannot be confused.
+The P010 artifact remains separate from the optional P009 EZSP policy overlay so diagnostics and tuning cannot be confused.
