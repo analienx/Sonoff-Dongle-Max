@@ -1,227 +1,289 @@
 # MG24 tuning research after the stock BUSY investigation
 
-This document separates **executor evidence**, **external/production-profile comparison**, and **future candidates**. It exists specifically to prevent P009 from turning into a bundle of unrelated parameter changes.
+This document separates **observed production evidence**, **linked/build evidence**, **stock-host runtime behavior**, and **future candidates**. Its purpose is to prevent the firmware from becoming a bundle of unrelated “large network” settings.
 
-## 1. What the retained production logs actually establish
+## 1. Production evidence
 
-The old `home-assistant-stack#47` evidence is stronger than Permit Join alone:
+The retained production evidence is stronger than Permit Join alone:
 
-- matched Permit-Join-All runs reproduced the same failure on stock herdsman 10.9.1 and the older P007 runtime;
-- coordinator-only permit controls remained clean;
-- settled stock operation contained real user-facing `ZCL GROUP ... status=BUSY` failures;
-- all retained settled runs had zero ASH transport errors;
-- the large `SOURCE_ROUTE_FAILURE` storm for NWK 24677 was strongly correlated with an operator diagnostic `/get` sweep and disappeared after that device rejoined with a new NWK address.
+- network-wide Permit Join reproduced intermittent BUSY;
+- coordinator-only Permit Join controls remained clean;
+- settled stock operation contained real user-facing group-send BUSY;
+- the same basic failure class survived the older P007 host retry approach;
+- retained settled ASH error counters were clean, although hourly sampling does not prove that host/transport queueing never contributes.
 
-Concrete retained group failures:
+Concrete retained ordinary group failures included:
 
 ```text
-22:25:12 / 23:19:40  Kitchen Table Bulbs          group 25  BUSY
-23:28:18              Sockets Nonessential Shutdown group 31 BUSY
-23:28:22              Lights All                   group 8  BUSY
+Kitchen Table Bulbs               group 25
+Sockets Nonessential Shutdown     group 31
+Lights All                        group 8
 ```
 
-This makes the best-supported mechanism:
+Best-supported high-level path:
 
 ```text
-coordinator-only permit       -> no network broadcast -> succeeds
-Permit Join All               -> ZDO/GP broadcasts -> intermittent BUSY
-ordinary Z2M group commands   -> multicast/broadcast path -> same BUSY
-ASH transport                 -> clean
+coordinator-only permit       -> no network broadcast -> clean
+Permit Join All               -> network broadcast(s) -> intermittent BUSY
+ordinary group sends          -> multicast/broadcast admission -> same BUSY class
 ```
 
-The first firmware intervention therefore remains broadcast/NWK admission headroom, not serial, routing or RF tuning.
+This keeps NCP network/send admission pressure as the leading branch. It does **not** prove that every BUSY was specifically `BROADCAST_TABLE_FULL`.
 
-## 2. Current resource comparison
+Credible alternatives/companions remain:
 
-| Resource | Nerivec MG24 stock | P009 | Current Nabu Casa ZBT-2 MG24 | Decision |
-|---|---:|---:|---:|---|
-| Broadcast table | 30 | **64** | **64** | P009 primary change |
-| Key table | 1 | **12** | **12** | keep P009 |
-| Neighbor table | 26 | 26 | 26 | hard max; no change |
-| Route table | 254 | 254 | 254 | effectively max |
-| Source-route table | 254 | 254 | 254 | effectively max |
-| Address table | 128 | 128 | 128 | no evidence to raise |
-| APS unicast messages | 128 | 128 | 128 | no evidence to raise |
-| Discovery table | 16 | 16 | 16 | no evidence to raise |
-| Multicast table | 26 | 26 | 26 | membership capacity, not send queue |
-| APS duplicate rejection | 64 | 64 | 64 | keep |
-| Packet-buffer heap | HUGE | HUGE | HUGE | keep |
-| Max end-device children | 64 | 64 | 32 | our value is already larger |
-| Child table | implicit 64 | implicit 64 | explicit 32 | no hidden bottleneck |
-| EUSART RX buffer | 128 | 128 | **512** | P010 robustness candidate |
-| UART | 115200/no-flow | same | 460800/CTS-RTS | hardware-specific; do not copy |
+- local `NEW_BROADCAST_ENTRY_THRESHOLD` rejection;
+- shared packet-buffer pressure;
+- PHY-to-MAC queue pressure;
+- NWK retry congestion;
+- callback/host transport backlog;
+- route/concentrator background work;
+- RF contention extending the lifetime of queued work.
 
-`SL_ZIGBEE_CHILD_TABLE_SIZE` defaults to `SL_ZIGBEE_MAX_END_DEVICE_CHILDREN`, so the Nerivec/P009 build's explicit max-children value of 64 also yields an effective child table of 64. There is no missing 32-entry child-table override to fix.
+## 2. P009 profile
 
-## 3. P009 binary cost
+P009 now changes exactly three values:
 
-First successful dedicated-repo CI build:
+| Resource | Stock | P009 | Decision |
+|---|---:|---:|---|
+| EUSART RX buffer | 128 | **512** | keep |
+| Broadcast table | 30 | **64** | primary intervention |
+| Key table | 1 | **12** | keep |
+
+Retained values:
+
+| Resource | P009 | Current decision |
+|---|---:|---|
+| Neighbor table | 26 | hard max; hold |
+| Route table | 254 | hold |
+| Source-route table | 254 | hold |
+| Address table | 128 | hold |
+| APS unicast messages | 128 | hold |
+| Discovery table | 16 | hold |
+| Multicast table | 26 | observe occupancy; do not raise yet |
+| Binding table | 32 | hold |
+| APS duplicate rejection | 64 | hold |
+| Compiled max direct children | 64 | host normally requests 32 |
+| Retry queue | 16 | hold |
+| Packet-buffer heap profile | HUGE | do not infer free bytes from linker reservation |
+
+## 3. Effective runtime configuration matters
+
+The architecture review traced the pinned stock zigbee-herdsman 10.9.1 initialization path.
+
+Important outcomes:
+
+- stock herdsman does **not** rewrite BTT64 downward;
+- stock herdsman does **not** rewrite KEY12 downward;
+- it normally attempts `MAX_END_DEVICE_CHILDREN=32` unless `stack_config.json` changes it;
+- route/source-route table capacities remain firmware-side capacities while concentrator behavior is configured separately;
+- `NEW_BROADCAST_ENTRY_THRESHOLD` is a distinct runtime admission control and its stock effective value is not yet proven by our deployment tooling;
+- the optional six-value P009 policy therefore changes behavior rather than merely “making the compile-time firmware effective”.
+
+Do not deploy threshold48 until the stock baseline is established and there is a reason to reserve exactly 16 broadcast entries for relayed traffic.
+
+## 4. Actual linked memory cost
+
+The special architecture review independently parsed the matched stock/P009 ELF files.
 
 ```text
-                         stock       P009       delta
-ELF text                 264044      264140      +96 B
-ELF data                   4612        4612        0 B
-ELF bss                  289208      289528     +320 B
-GBL bytes                268896      268992      +96 B
+                                  stock        P009      delta
+.text excluding RAM code         263,400     263,496       +96 B
+.data                               4,600       4,600         0 B
+.bss proper                        22,284      22,988      +704 B
+.stack                              4,096       4,096         0 B
+.noinit                               160         160         0 B
+.memory_manager_heap reservation 229,896     229,896         0 B
+GBL                               268,896     268,992       +96 B
 ```
 
-The MG24 memory-manager heap fills the remaining SRAM. P009's static cost is therefore very small.
-
-Historic/current Silicon documentation describes a broadcast-table entry as 6 bytes. Memory is not the reason to stop at 64: EZSP permits a broadcast table up to 254. The reason to stop at 64 is **network behavior and production precedent**. Silicon warns that a node able to originate far more broadcasts than neighbors can track can overwhelm those neighbors; current Nabu Casa MG24 firmware independently uses 64. P009 should validate 64 before considering anything larger.
-
-## 4. Ranked follow-up candidates
-
-### A — Immediate NCP pressure observability: HIGH VALUE
-
-Pinned herdsman 10.9.1 already does this once per hour:
+The +704 B `.bss` delta is:
 
 ```text
-ezspReadAndClearCounters()
-logger.info("[NCP COUNTERS] ...")
+RX buffer                                      +384 B
+broadcast table backing array                   +272 B
+incoming APS/key counter metadata                +44 B
+alignment/layout                                  +4 B
 ```
 
-It also exposes read-only `ezspReadCounters()`.
-
-Relevant Ember counters include:
+For this binary:
 
 ```text
-18 ASH_OVERFLOW_ERROR
-19 ASH_FRAMING_ERROR
-20 ASH_OVERRUN_ERROR
-27 ALLOCATE_PACKET_BUFFER_FAILURE
-29 PHY_TO_MAC_QUEUE_LIMIT_REACHED
-31 TYPE_NWK_RETRY_OVERFLOW
-32 PHY_CCA_FAIL_COUNT
-33 BROADCAST_TABLE_FULL
-40 ADDRESS_CONFLICT_SENT
+broadcast array stock: 240 B / 30 entries
+broadcast array P009:  512 B / 64 entries
 ```
 
-`BROADCAST_TABLE_FULL` is the most important discriminator: it increments when a NWK broadcast is dropped because the broadcast table is full.
+So the linked cost is **8 B per entry** here. The older generic “6 B per entry” statement is not valid for budgeting this build.
 
-Repository tool: `deploy/decode_ncp_counters.py` decodes already-retained hourly vectors without touching the coordinator.
+The memory-manager reservation remains 229,896 B because the extra static data consumed linker-layout gap before `.data`. That does **not** mean future static features have zero heap cost, and it does not mean 229,896 B is free Zigbee packet memory after startup.
 
-Future optional diagnostic overlay should perform a **read-only** counter snapshot immediately after a BUSY from ZDO broadcast, ZCL broadcast, or ZCL group. It must be best-effort only: no counter clear, no retry, no route change, and diagnostic failure must never mask the original send error.
+## 5. RX512
 
-### B — EUSART RX buffer 128 -> 512: GOOD P010 ROBUSTNESS CANDIDATE
+RX512 is already part of P009; it is not a future P010 candidate.
 
-Current Nabu Casa MG24 ZBT-2 firmware uses a 512-byte EUSART RX buffer versus 128 in the pinned Nerivec project.
-
-Estimated extra static SRAM cost:
+At 115200 baud, 8N1 nominal line rate is 11,520 B/s:
 
 ```text
-512 - 128 = 384 bytes
+128 B ~= 11.1 ms of line-rate storage
+512 B ~= 44.4 ms
 ```
 
-That is tiny on this MG24 build. It could make the NCP more tolerant of short host/serial bursts. However, the executor evidence reports zero ASH errors and the decisive failures are returned by Network/MAC send admission, so RX512 is **not** a justified part of the BUSY fix. Keep it as a separately testable P010 variant.
+This adds roughly 33 ms of short-burst tolerance. It does not increase sustained throughput and does not address NCP-to-host callback pressure or ESP-bridge buffering by itself.
 
-### C — Broadcast table >64: TECHNICALLY POSSIBLE, NOT CURRENTLY JUSTIFIED
+Keep SONOFF's EUSART1/115200/no-HW-flow contract unless end-to-end board/ESP evidence supports a change.
 
-EZSP documents a maximum of 254 entries. Do not use that maximum as a target.
+## 6. Multicast membership deserves observation
 
-Move beyond 64 only if all of the following are true:
+The 26-entry multicast table is not the number of groups the coordinator can transmit to. It is used for memberships/receive behavior.
 
-1. P009 still produces real group/broadcast BUSY;
-2. an immediate/nearby counter snapshot shows `BROADCAST_TABLE_FULL` increasing;
-3. HA-side burst pacing is already sane;
-4. a larger value is tested as a single-variable image.
+Pinned herdsman has fixed multicast memberships and adds application group memberships dynamically. With ~21 configured groups, actual usage can approach the table limit. This can affect receiving state/group traffic even though it is not the primary explanation for send-admission BUSY.
 
-Even then, prefer a modest next step rather than 254 because neighboring routers have their own broadcast-table limits.
+Next action is **observe occupancy/registration failures**, not immediately raise the table. If the verified requirement exceeds the available margin, a separate 26→32 image would cost roughly 24 B of raw backing storage plus measured alignment/auxiliary effects.
 
-### D — Runtime `NEW_BROADCAST_ENTRY_THRESHOLD`: CONDITIONAL
+## 7. Counter diagnostics
 
-Silicon defines the threshold as the maximum locally-originated broadcast entries before new local broadcasts are rejected. The difference
+Relevant existing Ember counters:
 
 ```text
-BROADCAST_TABLE_SIZE - NEW_BROADCAST_ENTRY_THRESHOLD
+ASH_OVERFLOW_ERROR
+ASH_FRAMING_ERROR
+ASH_OVERRUN_ERROR
+ALLOCATE_PACKET_BUFFER_FAILURE
+PHY_TO_MAC_QUEUE_LIMIT_REACHED
+TYPE_NWK_RETRY_OVERFLOW
+PHY_CCA_FAIL_COUNT
+BROADCAST_TABLE_FULL
+ADDRESS_CONFLICT_SENT
 ```
 
-is reserved for relaying broadcasts originated by other devices.
+`BROADCAST_TABLE_FULL` is important evidence but must be interpreted carefully:
 
-The prepared optional policy uses:
+- an increase supports broadcast-table pressure somewhere in that observation epoch;
+- it does not prove the locally failed command caused the increment;
+- a zero delta does not necessarily exclude local-threshold rejection unless that exact SDK path is known to increment the counter.
+
+Pinned herdsman clears its counter vector hourly. Any event-adjacent snapshot must record the owner session, time, clear/reset boundary, context and read latency.
+
+P010 now schedules a single read-only counter snapshot asynchronously and coalesces repeated BUSY triggers for five seconds. It does not delay propagation of the original BUSY.
+
+## 8. Routing evidence that should not be misused
+
+A historical source-route storm was dominated by an operator diagnostic `/get` sweep against a stale NWK address. After the device rejoined with a new NWK address, the failures disappeared. This is not evidence for enlarging route/source-route tables beyond the already-large 254/254 capacities.
+
+An earlier A/B changing `CONCENTRATOR_DELIVERY_FAILURE_THRESHOLD` from 1 to 3 was materially worse:
 
 ```text
-BROADCAST_TABLE_SIZE          64
-NEW_BROADCAST_ENTRY_THRESHOLD 48
+baseline threshold1:
+  MAC success/retry/fail 1645/1215/189
+  APS 1460/68
+  route discoveries 155
+  ZCL failures 2
+
+threshold3:
+  MAC success/retry/fail 1874/2150/419
+  APS 1582/101
+  route discoveries 180
+  ZCL failures 12
 ```
 
-which reserves 16 entries for relaying. Keep this policy separate from the firmware-first test until actual readback proves what stock herdsman/NCP initialization does with the enlarged compile-time table.
+Do not revive threshold3 without new evidence that invalidates that A/B.
 
-## 5. Parameters that should remain untouched without a matching error/counter
+Historical neighbor-table occupancy reached **26/26**. Twenty-six is the Silicon Labs hard maximum, so firmware cannot solve that by setting 27/32.
 
-### Neighbor table — 26
+## 9. Ranked next candidates
 
-26 is the Silicon Labs maximum. Nothing to improve.
+### A — Acceptance/evidence correctness: mandatory before flash
 
-### Route/source-route — 254/254
+- fresh current-owner identity rather than stale backup-file claims;
+- current Docker startup epoch for version evidence;
+- exact expected add-on owner;
+- complete 16-result active canary;
+- fail-fast Permit Join;
+- correlated close + fresh `permit_join=false`;
+- partial evidence persisted before STOP;
+- exact linked binary/profile contract.
 
-Already at the useful limit. The 24677 storm was predominantly caller-amplified stale route state and healed on rejoin/NWK change; it is not evidence that these tables were too small.
+This is being implemented in `p009-hardening`.
 
-### APS unicast message count — 128
+### B — Identity-only XNCP: strong follow-up
 
-Already very large. Exhaustion has a specific `ZIGBEE_MAX_MESSAGE_LIMIT_REACHED` failure signature, which is not the decisive group/broadcast BUSY signature.
-
-### Discovery table — 16
-
-A discovery table controls simultaneous route discoveries. Current Nabu Casa MG24 also uses 16. Increase only if future evidence shows actual route-discovery saturation.
-
-### Address table — 128
-
-This is EUI64-to-NWK association capacity for the application, not simply 'one row per joined device'. Current Nabu Casa MG24 also uses 128 and the logs do not show address-table exhaustion.
-
-### Multicast table — 26
-
-This controls groups **the coordinator itself is a member of**, not the number of group-cast messages it can originate. Twenty-one Z2M groups do not imply this table is near exhaustion.
-
-### Retry queue — 16
-
-Do not enlarge without `TYPE_NWK_RETRY_OVERFLOW`. More retry capacity can prolong pressure rather than remove it.
-
-### Baud/RTS-CTS
-
-Keep Dongle-M at its documented `115200`, `rtscts:false` profile. The ZBT-2 460800/CTS-RTS configuration is tied to different hardware plumbing and should not be copied to Dongle-M.
-
-### RF power / CCA / channel
-
-No retained evidence points to them as the BUSY root cause. `PHY_CCA_FAIL_COUNT` gives us an evidence path if RF contention later becomes relevant.
-
-## 6. Host-side complement that still makes sense
-
-P009 should not be used as permission to blast more broadcasts. For coordinator-originated bulk HA actions:
+A minimal custom extension should expose deterministic:
 
 ```text
-minimum ~1 s spacing between unrelated group/broadcast commands
-prefer ~2 s for large independent all-off/shutdown groups
+schema version
+project ID
+board ID
+firmware profile ID
+source/build ID
+canonical resource-profile hash
+stack/EZSP cross-check
+capability bitmap
 ```
 
-Critical OFF actions should use group-cast first, then reconcile individual devices by unicast only where actual state remains wrong. Direct-bound button traffic is not subject to this artificial pacing.
+Stock Zigbee2MQTT must remain able to ignore it. Do not copy Nabu Casa's entire behavior-changing extension merely for identity.
 
-## 7. Decision tree after P009
+### C — Event-adjacent counter snapshot: strong diagnostic
+
+Already prepared as P010, now non-blocking/rate-limited. Use only after a residual BUSY.
+
+### D — Multicast table 26→32: conditional
+
+Only after actual membership occupancy or registration failure demonstrates need.
+
+### E — Watchdog: conditional
+
+First prove whether the generated firmware has one enabled, what feeds it, and how reset cause is surfaced. Do not enable a watchdog merely because resets are generally desirable.
+
+### F — Scoped host pacing
+
+For HA-originated bulk groups only, avoid unnecessary concurrent broadcast bursts. Approximate 1 s spacing, or ~2 s for large independent shutdown groups, is an operating policy to validate—not a Zigbee requirement. Do not throttle direct-bound buttons or reorder non-idempotent commands.
+
+## 10. Rejected without new evidence
+
+Do not introduce:
+
+- BTT254;
+- blanket BUSY retry loops;
+- larger retry queue without retry-overflow evidence;
+- higher RF power as a generic fix;
+- ZBT-2 460800/CTS-RTS transport copied to SONOFF;
+- route/source-route growth beyond 254;
+- unsupported neighbor sizes;
+- “max everything” resource profiles;
+- bundled security-storage migration;
+- persistent NVM writes per BUSY/counter event;
+- unsolicited raw packet/health streaming.
+
+## 11. Decision tree after hardened P009
 
 ```text
-P009 acceptance passes
-    -> accept P009; stop tuning
+bounded P009 acceptance passes
+    -> accept operationally; stop testing
 
-residual BUSY + BROADCAST_TABLE_FULL rises
-    -> verify threshold/readback + HA burst pacing
-    -> only then consider a modest BTT >64 experiment
+residual BUSY
+    -> preserve exact call path + current session + counter epoch
 
-residual BUSY + NWK_RETRY_OVERFLOW rises
-    -> investigate retry/traffic source; do NOT automatically enlarge queue
+BROADCAST_TABLE_FULL rises
+    -> establish BTT + local threshold + host pacing
+    -> only then consider a modest single-variable BTT experiment
 
-residual BUSY + ALLOCATE_PACKET_BUFFER_FAILURE rises
-    -> packet-buffer/heap pressure investigation
+ALLOCATE_PACKET_BUFFER_FAILURE rises
+    -> inspect packet-pool acquisition/low-water/fragmentation
 
-residual BUSY + PHY_TO_MAC_QUEUE_LIMIT_REACHED rises
-    -> MAC scheduling/queue pressure investigation
+PHY_TO_MAC_QUEUE_LIMIT_REACHED rises
+    -> inspect MAC scheduling and callback/traffic bursts
 
-high PHY_CCA_FAIL_COUNT without BTT pressure
+NWK_RETRY_OVERFLOW rises
+    -> inspect retry source / routing; do not automatically enlarge queue
+
+PHY_CCA_FAIL_COUNT dominates without BTT pressure
     -> RF/channel/interference branch
 
-ASH_* counters/errors rise
-    -> transport branch; RX512 becomes materially justified
+ASH_* / host transport evidence rises
+    -> transport/ESP/UART branch
 
-none of the above rises
-    -> inspect exact status/call path before changing any firmware resource
+no discriminator moves
+    -> mechanism unresolved; inspect exact status path or isolated trace
 ```
 
-The objective is not to maximize every table. It is to make the Dongle-M more tolerant where this production network demonstrably needs headroom while preserving enough observability to know when a different subsystem is actually the bottleneck.
+The objective is not the largest possible tables. It is a coordinator whose limits are explicit, whose failures are interpretable, and whose changes can be attributed and rolled back.
