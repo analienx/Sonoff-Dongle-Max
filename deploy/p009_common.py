@@ -132,16 +132,15 @@ def container_session(host: str, container: str) -> dict[str, object]:
 
 def current_session_logs(host: str, container: str, started_at: str) -> str:
     q = shlex.quote
-    # StartedAt comes from Docker itself; --since binds evidence to this container start epoch.
     return remote_exec(host, f"docker logs --since {q(started_at)} {q(container)} 2>&1")
 
 
 def current_bridge_state(host: str, container: str) -> dict[str, object]:
-    """Read bridge/info and prove the currently running Z2M process answers a health request.
+    """Read bridge/info and prove the current Z2M process answers health_check.
 
-    bridge/info is retained MQTT state, so its `retain` bit is recorded rather than hidden.
-    Freshness is supplied by the correlated health-check response plus the Docker start epoch
-    and current-session logs. No second adapter/NCP client is opened.
+    bridge/info is retained MQTT state, so freshness is not inferred from that
+    payload alone. It is paired with a transaction-correlated health_check from
+    the current Docker owner/start epoch and current-session logs.
     """
     js = r'''const fs=require("node:fs");
 const mqtt=require("/app/node_modules/.pnpm/mqtt@5.15.2/node_modules/mqtt");
@@ -166,8 +165,10 @@ setTimeout(()=>finish(2,"timeout waiting for current bridge state/health respons
         die(f"cannot parse current bridge state: {exc}; output={raw[:300]!r}")
     if not isinstance(doc, dict) or not isinstance(doc.get("info"), dict) or not isinstance(doc.get("health"), dict):
         die("current bridge state did not contain both bridge/info and correlated health response")
-    if doc["health"].get("status") != "ok":
-        die(f"current Z2M health-check response is not OK: {doc['health']}")
+    health = doc["health"]
+    health_data = health.get("data") if isinstance(health, dict) else None
+    if health.get("status") != "ok" or not isinstance(health_data, dict) or health_data.get("healthy") is not True:
+        die(f"current Z2M health-check response is not healthy: {health}")
     return doc
 
 
@@ -214,8 +215,6 @@ def running_identity_evidence(host: str, addon: str, z2m_dir: str) -> tuple[dict
     bridge = current_bridge_state(host, container)
     op = operational_identity_from_bridge_info(bridge["info"])
     backup = _backup_identity_inside_container(host, container, z2m_dir)
-    # The live/current network fields come from the running owner. The key digest and
-    # backup entry count intentionally remain labelled backup evidence.
     identity = {
         **op,
         "network_key_sha256": backup.get("network_key_sha256"),
@@ -365,22 +364,26 @@ def load_build_manifest(path: Path) -> dict[str, object]:
         "SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE": 512,
         "SL_ZIGBEE_BROADCAST_TABLE_SIZE": 64,
         "SL_ZIGBEE_KEY_TABLE_SIZE": 12,
+        "SL_ZIGBEE_MULTICAST_TABLE_SIZE": 32,
     }
     required_s = {
         "SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE": 128,
         "SL_ZIGBEE_BROADCAST_TABLE_SIZE": 30,
         "SL_ZIGBEE_KEY_TABLE_SIZE": 1,
+        "SL_ZIGBEE_MULTICAST_TABLE_SIZE": 26,
     }
     if any(p_profile.get(k) != v for k, v in required_p.items()):
-        die(f"build manifest does not describe approved P009 RX512/BTT64/key12: {p_profile}")
+        die(f"build manifest does not describe approved P009 RX512/BTT64/key12/multicast32: {p_profile}")
     if any(s_profile.get(k) != v for k, v in required_s.items()):
-        die(f"build manifest does not describe stock rollback RX128/BTT30/key1: {s_profile}")
+        die(f"build manifest does not describe stock rollback RX128/BTT30/key1/multicast26: {s_profile}")
     allowed = set(doc.get("allowed_profile_differences") or [])
     if allowed != set(required_p):
         die(f"build manifest allowed profile differences are unexpected: {sorted(allowed)}")
     linked = doc.get("linked_evidence") or {}
     if not isinstance(linked, dict) or linked.get("validated") is not True:
         die("build manifest lacks successful linked-ELF evidence")
+    if linked.get("bss_delta_bytes") != 728 or linked.get("memory_manager_heap_delta_bytes") != 0:
+        die(f"build manifest linked memory evidence is not the approved multicast32 profile: {linked}")
     return doc
 
 
