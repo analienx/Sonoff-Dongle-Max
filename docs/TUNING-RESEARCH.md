@@ -1,6 +1,6 @@
 # MG24 tuning research after the stock BUSY investigation
 
-This document separates **observed production evidence**, **linked/build evidence**, **stock-host runtime behavior**, and **future candidates**. Its purpose is to prevent the firmware from becoming a bundle of unrelated “large network” settings.
+This document separates **observed production evidence**, **linked/build evidence**, **stock-host runtime behavior**, and **future candidates**. Its purpose is to prevent the firmware from becoming a bundle of unrelated “large network” settings while also avoiding unnecessary measurement work for changes whose downside is negligible.
 
 ## 1. Production evidence
 
@@ -42,13 +42,14 @@ Credible alternatives/companions remain:
 
 ## 2. P009 profile
 
-P009 now changes exactly three values:
+P009 now changes exactly four values:
 
 | Resource | Stock | P009 | Decision |
 |---|---:|---:|---|
 | EUSART RX buffer | 128 | **512** | keep |
 | Broadcast table | 30 | **64** | primary intervention |
 | Key table | 1 | **12** | keep |
+| Multicast table | 26 | **32** | low-cost membership headroom |
 
 Retained values:
 
@@ -60,7 +61,6 @@ Retained values:
 | Address table | 128 | hold |
 | APS unicast messages | 128 | hold |
 | Discovery table | 16 | hold |
-| Multicast table | 26 | observe occupancy; do not raise yet |
 | Binding table | 32 | hold |
 | APS duplicate rejection | 64 | hold |
 | Compiled max direct children | 64 | host normally requests 32 |
@@ -75,47 +75,57 @@ Important outcomes:
 
 - stock herdsman does **not** rewrite BTT64 downward;
 - stock herdsman does **not** rewrite KEY12 downward;
+- multicast capacity is firmware-side; herdsman consumes memberships but does not resize the table;
 - it normally attempts `MAX_END_DEVICE_CHILDREN=32` unless `stack_config.json` changes it;
 - route/source-route table capacities remain firmware-side capacities while concentrator behavior is configured separately;
 - `NEW_BROADCAST_ENTRY_THRESHOLD` is a distinct runtime admission control and its stock effective value is not yet proven by our deployment tooling;
 - the optional six-value P009 policy therefore changes behavior rather than merely “making the compile-time firmware effective”.
 
-Do not deploy threshold48 until the stock baseline is established and there is a reason to reserve exactly 16 broadcast entries for relayed traffic.
+Do not deploy threshold48 merely because BTT64 exists. Threshold changes admission behavior and have more downside than adding six multicast slots.
 
 ## 4. Actual linked memory cost
 
-The special architecture review independently parsed the matched stock/P009 ELF files.
+The architecture review independently parsed the matched stock/P009 ELF files before multicast32 was promoted. That three-delta image measured:
 
 ```text
-                                  stock        P009      delta
+                                  stock        old P009   delta
 .text excluding RAM code         263,400     263,496       +96 B
 .data                               4,600       4,600         0 B
 .bss proper                        22,284      22,988      +704 B
 .stack                              4,096       4,096         0 B
 .noinit                               160         160         0 B
 .memory_manager_heap reservation 229,896     229,896         0 B
-GBL                               268,896     268,992       +96 B
 ```
 
-The +704 B `.bss` delta is:
+The multicast32 promotion adds six 4-byte membership entries, so the current linked contract is:
+
+```text
+.bss proper                       22,284      23,012      +728 B
+.memory_manager_heap reservation 229,896     229,896         0 B
+```
+
+The expected +728 B `.bss` delta is:
 
 ```text
 RX buffer                                      +384 B
 broadcast table backing array                   +272 B
 incoming APS/key counter metadata                +44 B
+multicast table                                  +24 B
 alignment/layout                                  +4 B
 ```
 
-For this binary:
+For this binary generation:
 
 ```text
 broadcast array stock: 240 B / 30 entries
 broadcast array P009:  512 B / 64 entries
+multicast array stock: 104 B / 26 entries
+multicast array P009:  128 B / 32 entries
 ```
 
-So the linked cost is **8 B per entry** here. The older generic “6 B per entry” statement is not valid for budgeting this build.
+CI verifies these exact linked sizes on the fresh build. If alignment or generated code changes unexpectedly, the artifact fails rather than requiring a separate Home Assistant evidence campaign.
 
-The memory-manager reservation remains 229,896 B because the extra static data consumed linker-layout gap before `.data`. That does **not** mean future static features have zero heap cost, and it does not mean 229,896 B is free Zigbee packet memory after startup.
+The memory-manager reservation remains 229,896 B. That is a linker reservation, not a measurement of free Zigbee packet memory after startup.
 
 ## 5. RX512
 
@@ -130,15 +140,25 @@ At 115200 baud, 8N1 nominal line rate is 11,520 B/s:
 
 This adds roughly 33 ms of short-burst tolerance. It does not increase sustained throughput and does not address NCP-to-host callback pressure or ESP-bridge buffering by itself.
 
-Keep SONOFF's EUSART1/115200/no-HW-flow contract unless end-to-end board/ESP evidence supports a change.
+Keep SONOFF's EUSART1/115200/no-HW-flow contract unless end-to-end board/ESP support is proven.
 
-## 6. Multicast membership deserves observation
+## 6. Multicast membership: promoted directly
 
-The 26-entry multicast table is not the number of groups the coordinator can transmit to. It is used for memberships/receive behavior.
+The multicast table is not the number of groups the coordinator can transmit to. It is used for coordinator memberships/receive behavior.
 
-Pinned herdsman has fixed multicast memberships and adds application group memberships dynamically. With ~21 configured groups, actual usage can approach the table limit. This can affect receiving state/group traffic even though it is not the primary explanation for send-admission BUSY.
+Pinned herdsman has fixed multicast memberships and adds application group memberships dynamically. With roughly 21 configured groups, a 26-entry table has limited theoretical margin. A production occupancy campaign would tell us the precise margin, but that information is not worth hours of work before taking a change that costs only ~24 B and does not alter routing or broadcast admission.
 
-Next action is **observe occupancy/registration failures**, not immediately raise the table. If the verified requirement exceeds the available margin, a separate 26→32 image would cost roughly 24 B of raw backing storage plus measured alignment/auxiliary effects.
+Therefore P009 now uses **32** entries directly.
+
+This is the model to use for future tuning decisions:
+
+```text
+small static-memory cost + useful headroom + no meaningful behavioral downside
+    -> take the improvement and let CI verify the binary
+
+behavioral/routing/admission change or meaningful RAM cost
+    -> require stronger evidence first
+```
 
 ## 7. Counter diagnostics
 
@@ -203,7 +223,7 @@ Historical neighbor-table occupancy reached **26/26**. Twenty-six is the Silicon
 - partial evidence persisted before STOP;
 - exact linked binary/profile contract.
 
-This is being implemented in `p009-hardening`.
+Implemented in `p009-hardening`; CI remains the gate.
 
 ### B — Identity-only XNCP: strong follow-up
 
@@ -224,11 +244,11 @@ Stock Zigbee2MQTT must remain able to ignore it. Do not copy Nabu Casa's entire 
 
 ### C — Event-adjacent counter snapshot: strong diagnostic
 
-Already prepared as P010, now non-blocking/rate-limited. Use only after a residual BUSY.
+Prepared as P010, now non-blocking/rate-limited. Use only after a residual BUSY.
 
-### D — Multicast table 26→32: conditional
+### D — Multicast table 26→32: adopted
 
-Only after actual membership occupancy or registration failure demonstrates need.
+Promoted into P009 without an occupancy campaign because the linked cost is only ~24 B and the behavioral downside is negligible.
 
 ### E — Watchdog: conditional
 
@@ -249,6 +269,8 @@ Do not introduce:
 - ZBT-2 460800/CTS-RTS transport copied to SONOFF;
 - route/source-route growth beyond 254;
 - unsupported neighbor sizes;
+- forced runtime child64 without direct-child pressure;
+- threshold48 solely because it sounds like useful reserve;
 - “max everything” resource profiles;
 - bundled security-storage migration;
 - persistent NVM writes per BUSY/counter event;
@@ -286,4 +308,4 @@ no discriminator moves
     -> mechanism unresolved; inspect exact status path or isolated trace
 ```
 
-The objective is not the largest possible tables. It is a coordinator whose limits are explicit, whose failures are interpretable, and whose changes can be attributed and rolled back.
+The objective is not the largest possible tables. It is a coordinator whose limits are explicit, whose low-risk headroom is sensible, and whose higher-risk changes remain attributable and reversible.
