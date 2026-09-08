@@ -1,0 +1,484 @@
+name: Build SONOFF Dongle-Max release bundle
+
+on:
+  push:
+    branches:
+      - bundle-finalization
+      - main
+    paths:
+      - ".github/workflows/build-release.yml"
+      - "firmware/**"
+      - "runtime/**"
+      - "deploy/**"
+      - "tests/**"
+      - "docs/**"
+      - "release/**"
+      - "README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dongle-max-release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILDER_COMMIT: 858c34b0eb6f53a2e0c89455ea489ceaa62d58db
+  HERDSMAN_COMMIT: 0968f979d558874b17396c96b66382d4236bbdcd
+
+jobs:
+  quality:
+    name: Offline release contract and regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+      - name: Bind checkout and validate source tooling
+        run: |
+          set -euo pipefail
+          test "$(git -C repo rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -m py_compile repo/firmware/*.py repo/runtime/*.py repo/deploy/*.py repo/tests/*.py
+          node --check repo/deploy/acceptance-active.cjs
+          node --check repo/deploy/acceptance-permitjoin.cjs
+          PYTHONPATH=repo:repo/deploy:repo/firmware python3 -m unittest discover -s repo/tests -p 'test_*.py' -v
+          PYTHONPATH=repo:repo/deploy:repo/firmware python3 repo/deploy/p009_tool.py --help >/dev/null
+          python3 repo/deploy/decode_ncp_counters.py --help >/dev/null
+          python3 repo/deploy/decode_p011_identity.py --help >/dev/null
+          python3 -m json.tool repo/release/COMPONENTS.json >/dev/null
+          python3 -m json.tool repo/release/P012-STATUS.json >/dev/null
+      - name: Enforce release component semantics
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.loads(Path('repo/release/COMPONENTS.json').read_text())
+          c=d['components']
+          assert d['release_policy']['one_source_sha_per_bundle'] is True
+          assert d['release_policy']['production_flash_candidate']=='P009'
+          assert c['P009']['profile_id']=='P009-RX512-BTT64-KEY12-MCAST26'
+          assert c['P009']['default_enabled'] is True
+          assert c['P011']['default_enabled'] is False
+          assert c['P013']['profile_id']=='P013-P009-MCAST32'
+          assert c['P013']['default_enabled'] is False
+          assert c['P012']['watchdog_enabled_in_p009'] is False
+          assert c['host-bulk-lane']['status']=='offline-reference'
+          print('release component semantics: PASS')
+          PY
+
+  firmware:
+    name: Build and verify stock, P009, P011 and P013
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Nerivec/silabs-firmware-builder
+          ref: 858c34b0eb6f53a2e0c89455ea489ceaa62d58db
+          path: builder-stock
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Nerivec/silabs-firmware-builder
+          ref: 858c34b0eb6f53a2e0c89455ea489ceaa62d58db
+          path: builder-p009
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Nerivec/silabs-firmware-builder
+          ref: 858c34b0eb6f53a2e0c89455ea489ceaa62d58db
+          path: builder-p009-repro
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Nerivec/silabs-firmware-builder
+          ref: 858c34b0eb6f53a2e0c89455ea489ceaa62d58db
+          path: builder-p011
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Nerivec/silabs-firmware-builder
+          ref: 858c34b0eb6f53a2e0c89455ea489ceaa62d58db
+          path: builder-p013
+
+      - name: Bind all source checkouts
+        run: |
+          set -euo pipefail
+          test "$(git -C repo rev-parse HEAD)" = "$GITHUB_SHA"
+          for d in builder-stock builder-p009 builder-p009-repro builder-p011 builder-p013; do
+            test "$(git -C "$d" rev-parse HEAD)" = "$BUILDER_COMMIT"
+          done
+
+      - name: Apply frozen and variant profiles
+        run: |
+          set -euo pipefail
+          for d in builder-p009 builder-p009-repro builder-p011 builder-p013; do
+            python3 repo/firmware/patch_builder.py "$d"
+          done
+          python3 repo/firmware/patch_p011_xncp.py builder-p011 "$GITHUB_SHA" repo/firmware/p011_identity_template.c
+          python3 repo/firmware/patch_p013_multicast.py builder-p013
+          git -C builder-p009 diff --check
+          git -C builder-p011 diff --check
+          git -C builder-p013 diff --check
+          diff -u builder-p009/src/zigbee_ncp/zigbee_ncp.slcp builder-p009-repro/src/zigbee_ncp/zigbee_ncp.slcp
+          grep -A1 -F 'SL_ZIGBEE_MULTICAST_TABLE_SIZE' builder-p009/src/zigbee_ncp/zigbee_ncp.slcp | grep -F 'value: 26'
+          grep -A1 -F 'SL_ZIGBEE_MULTICAST_TABLE_SIZE' builder-p013/src/zigbee_ncp/zigbee_ncp.slcp | grep -F 'value: 32'
+          test -f builder-p011/src/zigbee_ncp/p011_identity_profile.json
+
+      - name: Resolve and record mutable Docker base-image provenance
+        run: |
+          set -euo pipefail
+          docker pull debian:trixie-slim
+          docker pull ghcr.io/astral-sh/uv:latest
+          python3 - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          def inspect(name):
+              d=json.loads(subprocess.check_output(['docker','image','inspect',name], text=True))[0]
+              return {'requested':name,'id':d.get('Id'),'repo_digests':d.get('RepoDigests') or []}
+          out={'schema':1,'resolved_in_run':True,'images':[inspect('debian:trixie-slim'),inspect('ghcr.io/astral-sh/uv:latest')]}
+          Path('TOOLCHAIN-BASE-IMAGES.json').write_text(json.dumps(out,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(out,indent=2,sort_keys=True))
+          PY
+
+      - name: Build pinned Silicon Labs toolchain image and capture provenance
+        run: |
+          set -euo pipefail
+          docker build --pull -t dongle-max-silabs-builder:9.1.1 builder-stock
+          {
+            echo "release_source_sha=$GITHUB_SHA"
+            echo "builder_commit=$BUILDER_COMMIT"
+            echo "builder_dockerfile_sha256=$(sha256sum builder-stock/Dockerfile | awk '{print $1}')"
+            echo "docker_image_id=$(docker image inspect --format '{{.Id}}' dongle-max-silabs-builder:9.1.1)"
+            echo "docker_repo_digests=$(docker image inspect --format '{{json .RepoDigests}}' dongle-max-silabs-builder:9.1.1)"
+            docker run --rm --entrypoint /bin/sh dongle-max-silabs-builder:9.1.1 -lc '
+              set -eu
+              export PATH=/root/.silabs/slt/bin:$PATH
+              printf "os_release="; tr "\n" ";" </etc/os-release; echo
+              printf "slc_version="; slc --version 2>&1 | head -1
+              printf "cmake_version="; cmake --version | head -1
+              printf "ninja_version="; ninja --version
+              printf "commander_version="; commander --version 2>&1 | head -1
+              gcc_root="$(slt where gcc-arm-none-eabi)"
+              test -n "$gcc_root" && test -x "$gcc_root/bin/arm-none-eabi-gcc"
+              printf "gcc_root=%s\n" "$gcc_root"
+              printf "gcc_version="; "$gcc_root/bin/arm-none-eabi-gcc" --version | head -1
+              /opt/venv/bin/python3 -c '"'"'import platform, importlib.metadata as m; print("python="+platform.python_version()); print("ruamel.yaml="+m.version("ruamel.yaml"))'"'"'
+            '
+          } | tee TOOLCHAIN-EVIDENCE.txt
+          cp builder-stock/Dockerfile BUILDER-Dockerfile.pinned-source
+
+      - name: Compile all firmware variants in the same resolved toolchain image
+        run: |
+          set -euo pipefail
+          build_one() {
+            root="$1"; repohash="$2"
+            docker run --rm -v "$GITHUB_WORKSPACE/$root:/repo" -w /repo dongle-max-silabs-builder:9.1.1 \
+              --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml \
+              --build-dir build --output-dir outputs \
+              --output gbl --output hex --output out \
+              --repo-owner analienx --repo-hash "$repohash"
+          }
+          build_one builder-stock stock911
+          build_one builder-p009 p009final
+          build_one builder-p009-repro p009final
+          build_one builder-p011 p011identity
+          build_one builder-p013 p013mcast32
+
+      - name: Prove clean-twin P009 reproducibility
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          def one(root,suffix):
+              xs=list(Path(root).glob(f'*{suffix}'))
+              if len(xs)!=1: raise SystemExit(f'{root}: expected one {suffix}, got {xs}')
+              p=xs[0]
+              return {'name':p.name,'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}
+          a={s[1:]:one('builder-p009/outputs',s) for s in ('.out','.hex','.gbl')}
+          b={s[1:]:one('builder-p009-repro/outputs',s) for s in ('.out','.hex','.gbl')}
+          same={k:a[k]['sha256']==b[k]['sha256'] for k in a}
+          r={'schema':2,'source_sha':__import__('os').environ['GITHUB_SHA'],'same_resolved_toolchain_image':True,'same_builder_source':True,'same_patch':True,'first':a,'second':b,'byte_identical':same}
+          Path('P009-REPRODUCIBILITY.json').write_text(json.dumps(r,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(r,indent=2,sort_keys=True))
+          if not same['out']: raise SystemExit('linked P009 ELF is not reproducible')
+          if not same['hex']: raise SystemExit('P009 HEX content is not reproducible')
+          PY
+
+      - name: Assemble generated and linked evidence
+        run: |
+          set -euo pipefail
+          mkdir -p bundle/{stock-rollback,p009,p011,p013,source-profiles,generated,linked,provenance,release}
+          cp builder-stock/outputs/* bundle/stock-rollback/
+          cp builder-p009/outputs/* bundle/p009/
+          cp builder-p011/outputs/* bundle/p011/
+          cp builder-p013/outputs/* bundle/p013/
+          cp builder-stock/src/zigbee_ncp/zigbee_ncp.slcp bundle/source-profiles/STOCK-zigbee_ncp.slcp
+          cp builder-p009/src/zigbee_ncp/zigbee_ncp.slcp bundle/source-profiles/P009-zigbee_ncp.slcp
+          cp builder-p011/src/zigbee_ncp/zigbee_ncp.slcp bundle/source-profiles/P011-zigbee_ncp.slcp
+          cp builder-p013/src/zigbee_ncp/zigbee_ncp.slcp bundle/source-profiles/P013-zigbee_ncp.slcp
+          cp builder-p011/src/zigbee_ncp/p011_identity_profile.json bundle/source-profiles/P011-IDENTITY.json
+          cp builder-stock/manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml bundle/source-profiles/sonoff_dongle-m_zigbee_ncp.yaml
+          cp TOOLCHAIN-EVIDENCE.txt TOOLCHAIN-BASE-IMAGES.json BUILDER-Dockerfile.pinned-source P009-REPRODUCIBILITY.json bundle/provenance/
+          cp repo/release/COMPONENTS.json repo/release/P012-STATUS.json repo/release/README.md bundle/release/
+          cp repo/docs/P012-WATCHDOG-RESET.md bundle/release/
+          cp repo/firmware/RESOURCE-PROFILE.md bundle/release/
+
+          capture_generated() {
+            root="$1"; name="$2"; dest="bundle/generated/$name"; mkdir -p "$dest"; count=0; catalog=0
+            while IFS= read -r -d '' f; do
+              rel="${f#${root}/}"
+              mkdir -p "$dest/$(dirname "$rel")"
+              cp "$f" "$dest/$rel"
+              count=$((count+1))
+              case "$f" in *sl_component_catalog.h) catalog=$((catalog+1));; esac
+            done < <(find "$root/build" -type f \( -name '*.map' -o -name 'sl_component_catalog.h' -o -name '*_config.h' -o -name 'compile_commands.json' -o -name 'build.ninja' -o -name 'CMakeCache.txt' -o -name 'slc_project_info.json' -o -name '*.slcp' \) -print0)
+            test "$count" -gt 0
+            test "$catalog" -gt 0 || { echo "$root emitted no sl_component_catalog.h" >&2; exit 1; }
+          }
+          capture_generated builder-stock stock
+          capture_generated builder-p009 p009
+          capture_generated builder-p011 p011
+          capture_generated builder-p013 p013
+          find bundle/generated -type f -print | sort > bundle/generated/GENERATED-FILES.txt
+
+          linked() {
+            root="$1"; name="$2"; out=$(find "$root/outputs" -maxdepth 1 -type f -name '*.out' -print -quit); test -n "$out"
+            readelf -hW "$out" > "bundle/linked/${name}-readelf-header.txt"
+            readelf -SW "$out" > "bundle/linked/${name}-readelf-sections.txt"
+            readelf -sW "$out" > "bundle/linked/${name}-readelf-symbols.txt"
+          }
+          linked builder-stock STOCK
+          linked builder-p009 P009
+          linked builder-p011 P011
+          linked builder-p013 P013
+
+      - name: Execute strict P009 and variant linked-image verifiers
+        run: |
+          set -euo pipefail
+          PYTHONPATH=repo/firmware python3 repo/firmware/verify_build_hardened.py \
+            --p009-dir bundle/p009 \
+            --stock-dir bundle/stock-rollback \
+            --p009-slcp bundle/source-profiles/P009-zigbee_ncp.slcp \
+            --stock-slcp bundle/source-profiles/STOCK-zigbee_ncp.slcp \
+            --manifest bundle/source-profiles/sonoff_dongle-m_zigbee_ncp.yaml \
+            --source-commit "$GITHUB_SHA" \
+            --output bundle/P009-BUILD-MANIFEST.json
+          PYTHONPATH=repo/firmware python3 repo/firmware/verify_variants.py \
+            --p009-dir bundle/p009 \
+            --p011-dir bundle/p011 \
+            --p013-dir bundle/p013 \
+            --p009-slcp bundle/source-profiles/P009-zigbee_ncp.slcp \
+            --p011-slcp bundle/source-profiles/P011-zigbee_ncp.slcp \
+            --p013-slcp bundle/source-profiles/P013-zigbee_ncp.slcp \
+            --p011-identity-json bundle/source-profiles/P011-IDENTITY.json \
+            --source-commit "$GITHUB_SHA" \
+            --output bundle/VARIANT-BUILD-MANIFEST.json
+
+      - name: Finalize firmware component inventory
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path('bundle')
+          base=json.loads((root/'P009-BUILD-MANIFEST.json').read_text())
+          var=json.loads((root/'VARIANT-BUILD-MANIFEST.json').read_text())
+          repro=json.loads((root/'provenance/P009-REPRODUCIBILITY.json').read_text())
+          bases=json.loads((root/'provenance/TOOLCHAIN-BASE-IMAGES.json').read_text())
+          inventory={
+            'schema':1,
+            'source_sha':os.environ['GITHUB_SHA'],
+            'run_id':os.environ['GITHUB_RUN_ID'],
+            'run_attempt':os.environ['GITHUB_RUN_ATTEMPT'],
+            'p009_profile_id':base['profile_id'],
+            'p009_linked':base['linked_evidence'],
+            'variant_profiles':{k:v['id'] for k,v in var['profiles'].items()},
+            'p009_reproducibility':repro['byte_identical'],
+            'resolved_base_images':bases['images'],
+            'toolchain_evidence_sha256':hashlib.sha256((root/'provenance/TOOLCHAIN-EVIDENCE.txt').read_bytes()).hexdigest(),
+          }
+          (root/'FIRMWARE-COMPONENT-MANIFEST.json').write_text(json.dumps(inventory,indent=2,sort_keys=True)+'\n')
+          PY
+          (cd bundle && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS && sha256sum -c SHA256SUMS)
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dongle-max-firmware-${{ github.sha }}
+          path: bundle/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: error
+
+  host_components:
+    name: Build host diagnostics, policy and research components
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Koenkk/zigbee-herdsman
+          ref: 0968f979d558874b17396c96b66382d4236bbdcd
+          path: herdsman-p009
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Koenkk/zigbee-herdsman
+          ref: 0968f979d558874b17396c96b66382d4236bbdcd
+          path: herdsman-p010
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Koenkk/zigbee-herdsman
+          ref: 0968f979d558874b17396c96b66382d4236bbdcd
+          path: herdsman-audit
+
+      - name: Bind source and apply isolated overlays
+        run: |
+          set -euo pipefail
+          test "$(git -C repo rev-parse HEAD)" = "$GITHUB_SHA"
+          for d in herdsman-p009 herdsman-p010 herdsman-audit; do test "$(git -C "$d" rev-parse HEAD)" = "$HERDSMAN_COMMIT"; done
+          python3 repo/runtime/patch_herdsman.py herdsman-p009
+          python3 repo/runtime/patch_herdsman_observability.py herdsman-p010
+          python3 repo/runtime/patch_herdsman_config_audit.py herdsman-audit
+          git -C herdsman-p009 diff --check
+          git -C herdsman-p010 diff --check
+          git -C herdsman-audit diff --check
+
+      - name: Build all pinned zigbee-herdsman overlays
+        run: |
+          set -euo pipefail
+          for d in herdsman-p009 herdsman-p010 herdsman-audit; do
+            (cd "$d" && corepack enable && corepack prepare pnpm@10.33.0 --activate && pnpm install --frozen-lockfile && pnpm run build)
+          done
+          grep -F '[P009 EZSP]' herdsman-p009/dist/adapter/ember/adapter/emberAdapter.js
+          ! grep -F '[P010 PRESSURE]' herdsman-p009/dist/adapter/ember/adapter/emberAdapter.js
+          grep -F '[P010 PRESSURE]' herdsman-p010/dist/adapter/ember/adapter/emberAdapter.js
+          grep -F 'ezspReadCounters' herdsman-p010/dist/adapter/ember/adapter/emberAdapter.js
+          ! grep -F '[P009 EZSP]' herdsman-p010/dist/adapter/ember/adapter/emberAdapter.js
+          grep -F '[P009 CONFIG]' herdsman-audit/dist/adapter/ember/adapter/emberAdapter.js
+          grep -F 'ezspGetConfigurationValue' herdsman-audit/dist/adapter/ember/adapter/emberAdapter.js
+
+      - name: Package host-side components
+        run: |
+          set -euo pipefail
+          mkdir -p host-bundle/{p009-runtime,p010-observability,p009-config-audit,bulk-lane,p012,release}
+          cp herdsman-p009/dist/adapter/ember/adapter/emberAdapter.js host-bundle/p009-runtime/
+          git -C herdsman-p009 diff --binary > host-bundle/p009-runtime/zigbee-herdsman-10.9.1-p009.patch
+          cp repo/runtime/README.md host-bundle/p009-runtime/README.md
+
+          cp herdsman-p010/dist/adapter/ember/adapter/emberAdapter.js host-bundle/p010-observability/
+          git -C herdsman-p010 diff --binary > host-bundle/p010-observability/zigbee-herdsman-10.9.1-p010-observability.patch
+          cp repo/runtime/OBSERVABILITY.md host-bundle/p010-observability/README.md
+
+          cp herdsman-audit/dist/adapter/ember/adapter/emberAdapter.js host-bundle/p009-config-audit/
+          git -C herdsman-audit diff --binary > host-bundle/p009-config-audit/zigbee-herdsman-10.9.1-p009-config-audit.patch
+          cp repo/docs/CONFIG-AUDIT.md host-bundle/p009-config-audit/README.md
+
+          cp repo/runtime/bulk_lane.py repo/tests/test_bulk_lane.py host-bundle/bulk-lane/
+          printf '%s\n' 'Offline/reference host traffic policy. Not automatically installed. See issue #10 and release/COMPONENTS.json.' > host-bundle/bulk-lane/README.txt
+
+          cp repo/docs/P012-WATCHDOG-RESET.md repo/release/P012-STATUS.json host-bundle/p012/
+          cp repo/release/COMPONENTS.json repo/release/README.md host-bundle/release/
+          printf '%s\n' "$GITHUB_SHA" > host-bundle/SOURCE-SHA
+          printf '%s\n' "$HERDSMAN_COMMIT" > host-bundle/HERDSMAN-SHA
+          (cd host-bundle && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS && sha256sum -c SHA256SUMS)
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dongle-max-host-${{ github.sha }}
+          path: host-bundle/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: error
+
+  aggregate:
+    name: Assemble immutable one-SHA release candidate
+    needs:
+      - quality
+      - firmware
+      - host_components
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+      - name: Bind aggregate checkout
+        run: |
+          set -euo pipefail
+          test "$(git -C repo rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: dongle-max-firmware-${{ github.sha }}
+          path: release-candidate/firmware
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: dongle-max-host-${{ github.sha }}
+          path: release-candidate/host
+
+      - name: Validate component checksums and create aggregate manifest
+        run: |
+          set -euo pipefail
+          (cd release-candidate/firmware && sha256sum -c SHA256SUMS)
+          (cd release-candidate/host && sha256sum -c SHA256SUMS)
+          mkdir -p release-candidate/contract
+          cp repo/release/COMPONENTS.json repo/release/P012-STATUS.json repo/release/README.md release-candidate/contract/
+          cp repo/docs/EXECUTOR-DEPLOY.md release-candidate/contract/EXECUTOR-DEPLOY.md
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path('release-candidate')
+          files=[]
+          for p in sorted(root.rglob('*')):
+              if not p.is_file() or p.name in {'SHA256SUMS','RELEASE-MANIFEST.json'}: continue
+              files.append({'path':p.relative_to(root).as_posix(),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          fw=json.loads((root/'firmware/FIRMWARE-COMPONENT-MANIFEST.json').read_text())
+          contract=json.loads((root/'contract/COMPONENTS.json').read_text())
+          if fw['source_sha']!=os.environ['GITHUB_SHA']: raise SystemExit('firmware manifest source SHA mismatch')
+          if contract['release_policy']['production_flash_candidate']!='P009': raise SystemExit('release contract production candidate drift')
+          out={
+            'schema':1,
+            'project':'analienx/Sonoff-Dongle-Max',
+            'source_sha':os.environ['GITHUB_SHA'],
+            'workflow_run_id':os.environ['GITHUB_RUN_ID'],
+            'workflow_run_attempt':os.environ['GITHUB_RUN_ATTEMPT'],
+            'production_flash_candidate':'P009',
+            'production_profile_id':'P009-RX512-BTT64-KEY12-MCAST26',
+            'flash_authorized':False,
+            'p012_hardware_validation_complete':False,
+            'files':files,
+          }
+          (root/'RELEASE-MANIFEST.json').write_text(json.dumps(out,indent=2,sort_keys=True)+'\n')
+          PY
+          (cd release-candidate && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS && sha256sum -c SHA256SUMS)
+
+      - name: Release-candidate summary
+        run: |
+          set -euo pipefail
+          {
+            echo '## SONOFF Dongle-Max release candidate'
+            echo
+            echo "- Source SHA: \`$GITHUB_SHA\`"
+            echo "- Production candidate: **P009-RX512-BTT64-KEY12-MCAST26**"
+            echo '- P011: identity-only experimental variant'
+            echo '- P012: hardware validation still required; no watchdog added to P009'
+            echo '- P013: multicast32 experimental variant'
+            echo '- Flash authorized: **NO**'
+            echo
+            jq -r '"- P009 linked .bss delta: \(.p009_linked.bss_delta_bytes) B"' release-candidate/firmware/FIRMWARE-COMPONENT-MANIFEST.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonoff-dongle-max-release-${{ github.sha }}
+          path: release-candidate/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: error
