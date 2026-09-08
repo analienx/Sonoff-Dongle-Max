@@ -1,90 +1,156 @@
-# P009 controlled deployment
+# P009 controlled deployment — mechanical operator runbook
 
-This is the **mechanical operator runbook**. The supervisor owns firmware/code/design. The executor must not tune parameters, patch code, add retries, change network identity, reset NVM or broaden testing.
+This is the **operator procedure**, not an engineering notebook. The supervisor owns firmware, scripts, CI, interpretation and fixes. The local executor runs only the exact approved commands, captures secret-safe evidence and stops at every stated gate.
 
-The deployment issue must pin the exact approved commit, Actions run, artifact ID, P009 GBL SHA256/size and matched rollback GBL SHA256/size. If those values are absent or disagree with `P009-BUILD-MANIFEST.json`, **STOP**.
+No code/config/workflow patching, parameter tuning, added retries, NVM reset, network reform, re-pairing or broadened testing is allowed.
 
-## 0. Approved build gate
+## 0. Current authorization source
 
-All three Actions jobs for the exact approved source commit must be green:
+Issue **#6** must contain a newest supervisor comment that explicitly pins all of the following from one green authoritative release run:
 
-1. P009 + stock rollback NCP;
-2. optional P009 runtime overlay;
-3. P010 diagnostic overlay.
+- exact repository source SHA;
+- Actions run ID;
+- aggregate artifact name/ID;
+- production profile ID `P009-RX512-BTT64-KEY12-MCAST26`;
+- P009 GBL filename, byte size and SHA-256;
+- matched stock rollback GBL filename, byte size and SHA-256;
+- exact checkout/runbook reference;
+- the currently authorized stopping point.
 
-The first production test uses **only the firmware artifact**; the other two jobs being green proves their buildability, not authorization to deploy them.
+If any value is absent, ambiguous, older than a later PAUSE comment, or disagrees with the downloaded manifests: **STOP**.
 
-Download `sonoff-dongle-max-p009-9.1.1`, extract it, and verify:
+Historical comments/artifacts are evidence only. They are not deployment authorization.
+
+## 1. Approved release gate
+
+The authoritative workflow is `.github/workflows/build-release.yml`. The exact approved source SHA must have a green aggregate release run in which:
+
+- offline regression tests passed;
+- stock rollback + frozen P009 built in the same resolved toolchain image;
+- clean-twin P009 linked ELF and HEX reproducibility passed;
+- strict linked P009 assertions passed;
+- P011 and P013 variant checks passed;
+- host P009/P010/config-audit overlays built from the same source SHA;
+- host bulk-lane and P012 status were packaged;
+- aggregate SHA256 inventory verified.
+
+Only **P009** is the first production flash candidate. P010/P011/P012/P013 and the host bulk lane are **not enabled or flashed** during the first P009 test.
+
+After extracting the aggregate artifact, verify the aggregate inventory from its root:
 
 ```bash
 sha256sum -c SHA256SUMS
 ```
 
-The hardened artifact must include at least:
+Then verify the firmware sub-bundle independently:
 
-```text
-P009-BUILD-MANIFEST.json          schema 2
-P009-TOOLCHAIN-EVIDENCE.txt
-P009-DEPLOY.txt
-source-profile/
-generated/p009/
-generated/rollback-stock/
-linked/
-p009/
-rollback-stock/
-SHA256SUMS
+```bash
+cd firmware
+sha256sum -c SHA256SUMS
+cd ..
 ```
 
-`P009-BUILD-MANIFEST.json` binds the exact repository source commit, builder pin, RX512/BTT64/KEY12/multicast32 source profile, linked-ELF evidence and artifact hashes. The approved linked profile requires `.bss` delta **728 B** and unchanged memory-manager reservation. Any mismatch: **STOP before touching HA**.
+Required release structure includes at least:
 
-Work from the exact source commit recorded in the manifest. Hardened `arm` rejects a different local Git HEAD.
+```text
+RELEASE-MANIFEST.json
+SHA256SUMS
+firmware/
+  P009-BUILD-MANIFEST.json
+  VARIANT-BUILD-MANIFEST.json
+  FIRMWARE-COMPONENT-MANIFEST.json
+  SHA256SUMS
+  p009/
+  stock-rollback/
+  p011/
+  p013/
+  source-profiles/
+  generated/
+  linked/
+  provenance/
+host/
+contract/
+```
+
+`RELEASE-MANIFEST.json` must state:
+
+```text
+production_flash_candidate = P009
+production_profile_id      = P009-RX512-BTT64-KEY12-MCAST26
+flash_authorized           = false
+```
+
+`flash_authorized=false` is intentional: release CI prepares the artifact; the separate supervisor/human gate authorizes a physical flash.
+
+`firmware/P009-BUILD-MANIFEST.json` must describe exactly:
+
+```text
+P009:
+  RX buffer       512
+  BTT              64
+  key table        12
+  multicast        26
+
+stock rollback:
+  RX buffer       128
+  BTT              30
+  key table         1
+  multicast        26
+
+linked .bss delta        +704 B
+memory-manager delta        0 B
+```
+
+Any MCAST32 image is **P013**, never P009. Any mismatch: STOP before touching HA.
 
 ## Remote transport
 
-Existing proxy route:
+The established proxy route is:
 
 ```text
 --remote-template "rtk proxy ssh {host} {command}"
 ```
 
-The template must contain `{host}` and `{command}`. Once ARMED, the session locks host, add-on, Z2M path and remote transport; do not switch them mid-session.
+The session locks host, add-on, Z2M directory and remote transport at ARM. Do not change them mid-session.
 
-## 1. Snapshot + ARM
+## 2. ARM — the first local execution gate
+
+Work from the exact repository SHA in the approved release manifest. The hardened ARM command rejects a different local Git HEAD.
+
+Assuming the extracted aggregate artifact is at `.local/dongle-max-release`:
 
 ```powershell
 python deploy/p009_tool.py `
   --remote-template "rtk proxy ssh {host} {command}" `
   arm `
-  --bundle-root .local/p009/firmware `
-  --build-manifest .local/p009/firmware/P009-BUILD-MANIFEST.json `
+  --bundle-root .local/dongle-max-release/firmware `
+  --build-manifest .local/dongle-max-release/firmware/P009-BUILD-MANIFEST.json `
   --session .local/p009/session.json `
   --confirm P009-ARM
 ```
 
-ARM now proves more than the old runbook:
+ARM must prove/capture:
 
-- exact source commit matches build manifest;
-- whole bundle hashes valid;
-- exact P009/stock GBL SHA256 **and byte size** valid;
-- P009 source profile is RX512/BTT64/KEY12/multicast32 and stock rollback is RX128/BTT30/key1/multicast26;
-- linked-ELF evidence in manifest was validated by CI, including the 728-B `.bss` delta;
-- exactly one running Zigbee2MQTT container exists;
-- it is the exact expected HA add-on container, not merely a similarly named process;
-- Docker container ID and `StartedAt` are captured;
-- current Docker-start-epoch logs show EmberZNet 9.1.1 / EZSP19;
-- the running Z2M process answers a correlated MQTT `health_check` request with `status=ok` and `data.healthy=true`;
-- coordinator IEEE/PAN/extPAN/channel come from current `bridge/info`;
-- network-key plaintext stays on HA; only its SHA256 fingerprint comes from `coordinator_backup.json` inside the current owner container;
-- stopped-state hashes are captured for `configuration.yaml`, `database.db`, `coordinator_backup.json`;
-- stopped-state tar backup is created and hashed;
-- after the add-on is stopped, there is no residual Zigbee2MQTT container;
-- session reaches exactly `ARMED`.
+- exact checked-out source SHA equals the build manifest;
+- firmware sub-bundle SHA256 inventory is valid;
+- exact P009 and stock rollback GBL SHA256 + byte sizes are valid;
+- manifest is frozen three-delta P009 with multicast26 and linked +704-B `.bss` proof;
+- exactly one running Zigbee2MQTT owner exists and is the expected HA add-on container;
+- exact Docker container ID and `StartedAt` are captured;
+- approved EmberZNet 9.1.1 and EZSP19 are proven from structured coordinator/backup evidence with current-start-log fallback;
+- a fresh Zigbee2MQTT 2.14 health probe succeeds: the request payload is **empty**, the healthy response is non-retained and is observed after publication;
+- current coordinator IEEE/PAN/extPAN/channel come from secret-safe `bridge/info` fields;
+- the network-key plaintext remains on HA; only its SHA-256 fingerprint leaves the owner container;
+- stopped-state hashes for `configuration.yaml`, `database.db` and `coordinator_backup.json` are captured where present;
+- stopped-state backup is created and hashed;
+- Zigbee2MQTT is stopped and no residual owner remains;
+- session phase reaches exactly `ARMED`.
 
-The backup file is **not** represented as a live NCP identity read. Its key fingerprint/device count are backup evidence; current network fields come from the active owner session.
+The backup is not misrepresented as a live NCP read. Live network fields and backup-derived key/device metadata are separate evidence sources.
 
-If ARM fails or is interrupted after session creation, the session is `STOPPED`. Do not repair around it.
+If ARM fails or is interrupted after session creation, the session becomes `STOPPED`. Do not work around it locally.
 
-Check state:
+Status check:
 
 ```powershell
 python deploy/p009_tool.py `
@@ -95,31 +161,33 @@ python deploy/p009_tool.py `
 
 ### Required ARMED report
 
-Post only secret-safe evidence:
+Post to issue #6 only secret-safe evidence:
 
-- approved source commit/run/artifact;
-- verified P009 GBL path + bytes + SHA256;
-- verified rollback GBL path + bytes + SHA256;
-- session phase `ARMED`;
-- current-session identity fields/fingerprints;
-- Docker owner/start evidence;
-- stopped-state backup path + SHA256;
-- confirmation Z2M is STOPPED and no residual owner exists.
+- source SHA + approved run/artifact;
+- P009 GBL path/bytes/SHA256;
+- rollback GBL path/bytes/SHA256;
+- phase `ARMED`;
+- owner container ID/start epoch;
+- coordinator IEEE/PAN/extPAN/channel;
+- network-key fingerprint, never key plaintext;
+- stopped backup path/SHA256;
+- confirmation Zigbee2MQTT is stopped and no residual owner exists.
 
-Then **STOP before WebUI flash** until the human/supervisor authorizes that exact artifact.
+Then **STOP. Do not flash.** The supervisor must inspect ARMED evidence and issue a separate authorization for that exact P009 hash.
 
-## 2. Manual WebUI flash + artifact acknowledgment
+## 3. Manual SONOFF WebUI flash
 
-Upload only the exact P009 GBL printed by ARM through the proven SONOFF Dongle-M WebUI.
+Only after explicit supervisor authorization, upload the exact P009 GBL printed by ARM.
 
 Forbidden:
 
+- P011 or P013 instead of P009;
 - NVM erase;
 - factory reset;
 - new-network creation;
-- channel/key/PAN changes.
+- PAN/extPAN/channel/key changes.
 
-After WebUI reports success, acknowledge the exact ARM-verified SHA:
+After WebUI reports successful upload, acknowledge the exact ARM-bound SHA:
 
 ```powershell
 python deploy/p009_tool.py `
@@ -130,11 +198,9 @@ python deploy/p009_tool.py `
   --confirm P009-FLASHED
 ```
 
-This is **human artifact acknowledgment**, not device-side firmware attestation. Do not claim otherwise. A future identity-only XNCP variant is intended to close that gap.
+This is **human artifact acknowledgment**, not device-side attestation. P011 is the separate future self-identifying variant.
 
-## 3. Current-session post-flash identity gate
-
-Run:
+## 4. Post-flash owner/network identity gate
 
 ```powershell
 python deploy/p009_tool.py `
@@ -144,39 +210,34 @@ python deploy/p009_tool.py `
   --confirm P009-POSTFLASH
 ```
 
-The tool expects the add-on still to be stopped, starts it itself, and collects a **new** current-owner session.
+The tool starts Z2M itself and requires a genuinely new owner session. Required invariants:
 
-Required:
-
-- new Docker start epoch versus pre-arm;
-- exact expected Z2M add-on owner;
-- current-session 9.1.1 / EZSP19 evidence;
+- new Docker start epoch compared with pre-arm;
+- exact expected HA add-on owner;
+- EmberZNet 9.1.1 / EZSP19;
 - same coordinator IEEE;
-- same PAN;
-- same extPAN;
-- same channel;
-- same network-key SHA256 fingerprint;
-- same key sequence;
-- same backup device count;
-- unchanged `configuration.yaml` for this firmware-only test.
+- same PAN/extPAN/channel;
+- same network-key SHA-256 and key sequence;
+- same coordinator-backup device count;
+- unchanged `configuration.yaml` in this firmware-only test.
 
 Expected phase: `IDENTITY_VERIFIED`.
 
-The stock-host contract at this point is intentionally recorded as:
+Stock-host interpretation:
 
 ```text
-BTT: binary=64; stock herdsman does not rewrite it downward
-KEY: binary=12; stock herdsman does not rewrite it downward
-MULTICAST: binary=32; firmware-side membership capacity
-children: binary capacity=64; stock host normally requests runtime max=32
-NEW_BROADCAST_ENTRY_THRESHOLD: separate runtime admission policy; not changed in first test
+BTT: binary 64; stock herdsman normally does not lower it
+KEY: binary 12; stock herdsman normally does not lower it
+MULTICAST: binary 26 in P009
+children: compiled capacity 64; stock host normally asks for 32
+NEW_BROADCAST_ENTRY_THRESHOLD: separate policy; unchanged in first test
 ```
 
-Do **not** deploy the six-value P009 runtime overlay in order to manufacture a threshold readback during this first test.
+Do not install the P009 runtime policy, P010 diagnostics, P011, P012 or P013 during this baseline test.
 
-Any post-flash failure stops Z2M, persists available evidence and marks `STOPPED`.
+Any post-flash failure persists evidence, stops the session and must be reviewed before any further action.
 
-## 4. Bounded automated acceptance
+## 5. Bounded automated acceptance
 
 ```powershell
 python deploy/p009_tool.py `
@@ -188,138 +249,114 @@ python deploy/p009_tool.py `
 
 ### Active canary
 
-The script must schedule and complete exactly:
+Exactly:
 
 ```text
-2 rounds x 8 known mains-powered targets = 16 unique transactions
+2 rounds × 8 known mains-powered targets = 16 unique transactions
 ```
 
-Pass requires:
+Pass requires all of:
 
-- exactly 16 scheduled;
-- exactly 16 completed;
-- exactly 16 unique result IDs;
+- 16 scheduled;
+- 16 completed;
+- 16 unique result IDs;
 - >=15 successes;
 - no global timeout;
-- no malformed correlated MQTT evidence.
+- no malformed correlated evidence.
 
-`15/15` is **not** a pass.
+`15/15` is not a pass. Reconnect cannot replay a second stimulus sequence.
 
-After the active phase, the Python coordinator checks the exact log delta **before starting Permit Join**. A hard BUSY/message-pressure/reset/disconnect signature stops the test immediately; no Permit Join stimuli follow.
+Before Permit Join starts, the exact active-phase log delta is checked for hard BUSY/message-pressure/reset/disconnect signatures. A hard signature stops the run immediately.
 
-### Permit Join
+### Permit Join All
 
-Clean success path:
+Clean path:
 
 ```text
-exactly 5 serial Permit Join All trials
+5 serial trials
 10 seconds each
 no pairing
 no executor-added retry
 ```
 
-On the **first failed trial**, no further opening stimulus is scheduled.
+On the first failed trial no further open window is scheduled.
 
-Each trial requires:
+Cleanup always attempts a final `time:0` close and requires a fresh `permit_join=false` observation. Log-window loss/rotation fails the gate rather than becoming a warning. The same Docker owner/start epoch must own the whole bounded acceptance.
 
-- correlated bridge response;
-- no BUSY / max-message / no-buffer / message-too-long evidence in its window;
-- a fresh `bridge/info` observation showing `permit_join=false` after the window.
+Clean phase: `AUTOMATED_ACCEPTANCE_PASSED`.
 
-Cleanup always attempts a correlated `time:0` close and requires a fresh `permit_join=false` observation. Cleanup is safety work, not an extra success trial.
+## 6. Exactly two real group checks
 
-The full acceptance log delta must remain exact; log rotation/loss means evidence is incomplete and the gate fails rather than printing a warning.
+After automated acceptance, perform exactly two representative normal group commands, preferably historically BUSY-sensitive groups where physically safe.
 
-The same Docker container ID/start epoch must own the adapter from acceptance start to end.
+Each evidence record must contain non-empty:
 
-Partial active/Permit Join evidence is persisted into the session **before** STOP handling.
-
-Expected clean phase: `AUTOMATED_ACCEPTANCE_PASSED`.
-
-## 5. Exactly two structured real group checks
-
-After automated acceptance passes, issue exactly two representative normal group operations. Prefer historically BUSY-sensitive groups when safe.
-
-For each one record:
-
-- group/entity/topic;
-- exact command;
-- timestamp;
-- command result from HA/Z2M/MQTT;
-- human-verified physical result.
-
-Finalize requires each evidence item as JSON. Example shape:
-
-```json
-{"group":"Lights All","command":"OFF","timestamp":"2026-09-07T21:00:00+02:00","command_result":"Z2M accepted","physical_result":"selected loads switched off"}
+```text
+group
+command
+timestamp
+command_result
+physical_result
 ```
 
-PowerShell example:
+Example:
+
+```json
+{"group":"Lights All","command":"OFF","timestamp":"2026-09-08T20:00:00+02:00","command_result":"Z2M accepted","physical_result":"selected loads switched off"}
+```
+
+Finalize:
 
 ```powershell
 python deploy/p009_tool.py `
   --remote-template "rtk proxy ssh {host} {command}" `
   finalize `
   --session .local/p009/session.json `
-  --group-evidence '{"group":"<group1>","command":"<cmd>","timestamp":"<ISO8601>","command_result":"<result>","physical_result":"<human verified>"}' `
-  --group-evidence '{"group":"<group2>","command":"<cmd>","timestamp":"<ISO8601>","command_result":"<result>","physical_result":"<human verified>"}' `
+  --group-evidence '<GROUP1_JSON>' `
+  --group-evidence '<GROUP2_JSON>' `
   --confirm P009-FINALIZE
 ```
 
-Finalize rechecks current identity and requires the **same Docker owner/start epoch as postflash**. Clean result: `ACCEPTED`.
+Finalize rechecks current identity and the same owner/start epoch. Clean phase: `ACCEPTED`.
 
-`ACCEPTED` means stop testing. It is a bounded operational acceptance result, not long-term reliability certification.
-
-## Report
-
-```powershell
-python deploy/p009_tool.py report --session .local/p009/session.json
-```
-
-Post the generated report plus both structured group observations. Never paste plaintext network keys, MQTT credentials or tokens.
+`ACCEPTED` is a bounded operational screen, not long-term reliability certification. Stop testing after it passes.
 
 ## Hard STOP conditions
 
 Stop immediately on any of:
 
-- artifact/source/hash/byte-size mismatch;
-- linked evidence absent/unvalidated or not the approved +728-B multicast32 profile;
-- wrong baseline 9.1.1/EZSP19;
+- source/run/artifact/hash/byte-size mismatch;
+- P009 profile not exactly RX512/BTT64/KEY12/MCAST26;
+- linked +704-B evidence absent or mismatched;
+- wrong EmberZNet/EZSP baseline;
 - wrong/multiple Z2M owner;
-- unexpected owner restart during a bounded gate;
+- unexpected owner restart inside a bounded gate;
 - backup/hash failure;
-- WebUI uncertainty or flash error;
-- post-flash network identity drift;
+- WebUI uncertainty/flash failure;
+- coordinator/network identity drift;
 - new-network/reset/mass-rejoin behavior;
-- active canary incomplete or <15/16;
+- incomplete or <15/16 active canary;
 - BUSY / MAX_MESSAGE_LIMIT / NO_BUFFERS / MESSAGE_TOO_LONG during acceptance;
 - NCP/ASH reset/disconnect/NETWORK_DOWN;
 - malformed/incomplete MQTT evidence;
 - Permit Join closure not freshly proven;
-- log-window loss/rotation during the bounded gate.
+- log-window loss/rotation.
 
-Do not “try again”, add delays/retries, change tuning or generate extra diagnostic traffic after a hard-stop event.
-
-## Optional overlays
-
-Do **not** deploy during first P009 acceptance:
-
-- `sonoff-dongle-max-herdsman-p009-10.9.1` — behavior-changing runtime policy;
-- `sonoff-dongle-max-herdsman-p010-observability-10.9.1` — diagnostic-only BUSY counter snapshot.
-
-If residual BUSY survives accepted P009 operation, the supervisor decides whether/when P010 is justified.
+Do not retry by adding delays, retries, tuning or extra diagnostic traffic after a hard stop.
 
 ## Rollback
 
-If failure occurs after firmware was actually flashed:
+If failure occurs **after P009 was actually flashed**:
 
-1. preserve the failure evidence;
+1. preserve failure evidence;
 2. stop Z2M;
-3. manually flash **only the matched `rollback-stock` GBL from the same approved artifact**;
+3. manually flash **only the matched `stock-rollback` GBL from the same approved release artifact**;
 4. do not reset NVM;
-5. start stock Z2M and verify 9.1.1/EZSP19 + original network identity.
+5. start stock Z2M and verify 9.1.1/EZSP19 plus original network identity.
 
-Do not restore the Z2M data tar just because firmware was rolled back. Restore data only if the configuration/database itself was actually mutated/damaged:
+If the NCP is completely unavailable to EZSP after the flash, rollback is still a manual SONOFF WebUI firmware operation; do not make network recovery conditional on a working EZSP session.
+
+Do not restore the Z2M data tar merely because firmware was rolled back. Restore data only if configuration/database state was actually mutated or damaged:
 
 ```powershell
 python deploy/p009_tool.py `
@@ -329,4 +366,12 @@ python deploy/p009_tool.py `
   --confirm P009-RESTORE-DATA
 ```
 
-The restore verifies tar SHA256, quarantines failed data and validates restored core-file hashes. Any interrupted restore stays `STOPPED`.
+The restore validates the backup hash, quarantines failed data and revalidates core-file hashes.
+
+## Reporting
+
+```powershell
+python deploy/p009_tool.py report --session .local/p009/session.json
+```
+
+Never post plaintext network keys, MQTT passwords/tokens or other secrets.
