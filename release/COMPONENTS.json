@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "project": "analienx/Sonoff-Dongle-Max",
+  "release_policy": {
+    "one_source_sha_per_bundle": true,
+    "production_flash_candidate": "P009",
+    "experimental_components_are_never_implicit": true,
+    "local_hardware_validation_required_before_flash": true
+  },
+  "components": {
+    "stock-rollback": {
+      "required": true,
+      "kind": "firmware",
+      "status": "rollback",
+      "default_enabled": false
+    },
+    "P009": {
+      "required": true,
+      "kind": "firmware",
+      "status": "production-candidate",
+      "profile_id": "P009-RX512-BTT64-KEY12-MCAST26",
+      "default_enabled": true,
+      "resource_deltas": {
+        "SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE": [128, 512],
+        "SL_ZIGBEE_BROADCAST_TABLE_SIZE": [30, 64],
+        "SL_ZIGBEE_KEY_TABLE_SIZE": [1, 12]
+      }
+    },
+    "P010": {
+      "required": true,
+      "kind": "host-overlay",
+      "status": "diagnostic-only",
+      "default_enabled": false,
+      "behavior": "non-blocking BUSY pressure snapshot"
+    },
+    "P011": {
+      "required": true,
+      "kind": "firmware",
+      "status": "experimental-identity",
+      "profile_id": "P011-IDENTITY-ON-P009",
+      "default_enabled": false,
+      "behavior": "read-only XNCP self-identification; not cryptographic remote attestation"
+    },
+    "P012": {
+      "required": true,
+      "kind": "research-and-diagnostics",
+      "status": "requires-local-hardware-validation",
+      "default_enabled": false,
+      "watchdog_enabled_in_p009": false,
+      "promotion_requires": [
+        "controlled hang on non-production hardware",
+        "observable reset cause",
+        "no reset loop",
+        "network state preserved"
+      ]
+    },
+    "P013": {
+      "required": true,
+      "kind": "firmware",
+      "status": "experimental-resource-variant",
+      "profile_id": "P013-P009-MCAST32",
+      "default_enabled": false,
+      "resource_delta_vs_p009": {
+        "SL_ZIGBEE_MULTICAST_TABLE_SIZE": [26, 32]
+      }
+    },
+    "host-bulk-lane": {
+      "required": true,
+      "kind": "host-policy",
+      "status": "offline-reference",
+      "default_enabled": false,
+      "guardrails": [
+        "no global delay",
+        "no hidden BUSY retries",
+        "no direct-binding latency change",
+        "no coalescing of toggle/step/safety-OFF operations"
+      ]
+    }
+  }
+}
