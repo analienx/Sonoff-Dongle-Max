@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import sys
 import unittest
 from pathlib import Path
@@ -10,7 +11,8 @@ for p in (ROOT / "firmware", ROOT / "deploy"):
         sys.path.insert(0, str(p))
 
 from verify_build_hardened import extract_eusart_rx_buffer
-from p009_version import validate_approved_firmware
+from p009_ownerproof import validate_owner_consistency
+from p009_version import current_bridge_state_214, validate_approved_firmware
 
 
 class ReleaseHardeningTests(unittest.TestCase):
@@ -68,6 +70,28 @@ class ReleaseHardeningTests(unittest.TestCase):
         }
         with self.assertRaises(RuntimeError):
             validate_approved_firmware(snap, "test")
+
+    def test_health_probe_source_uses_z2m_214_empty_request_and_nonretained_freshness(self):
+        src = inspect.getsource(current_bridge_state_214)
+        self.assertIn('c.publish(req,""', src)
+        self.assertIn('healthRetain', src)
+        self.assertIn('responseMs>=requestMs', src)
+        self.assertNotIn('transaction:', src)
+
+    def test_owner_consistency_accepts_one_exact_epoch(self):
+        owner = {"container": "addon_z2m", "container_id": "a" * 64, "started_at": "2026-09-08T18:00:00Z"}
+        snap = {"identity_evidence": {"owner": dict(owner)}}
+        proof = validate_owner_consistency(snap, dict(owner), dict(owner))
+        self.assertTrue(proof["same_before_embedded_after"])
+        self.assertEqual(snap["identity_evidence"]["owner_consistency"]["container_id"], "a" * 64)
+
+    def test_owner_consistency_rejects_restart_in_enrichment_window(self):
+        before = {"container": "addon_z2m", "container_id": "a" * 64, "started_at": "2026-09-08T18:00:00Z"}
+        embedded = dict(before)
+        after = {"container": "addon_z2m", "container_id": "b" * 64, "started_at": "2026-09-08T18:00:02Z"}
+        snap = {"identity_evidence": {"owner": embedded}}
+        with self.assertRaises(RuntimeError):
+            validate_owner_consistency(snap, before, after)
 
 
 if __name__ == "__main__":
