@@ -21,9 +21,9 @@ concurrency:
 
 jobs:
   firmware:
-    name: Build and verify P009 + stock rollback NCP
+    name: Build, reproduce and verify P009 + stock rollback NCP
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -31,10 +31,10 @@ jobs:
       - name: Validate repo tooling
         run: |
           set -euo pipefail
-          python3 -m py_compile repo/firmware/*.py repo/runtime/*.py repo/deploy/*.py repo/tests/test_p009.py
+          python3 -m py_compile repo/firmware/*.py repo/runtime/*.py repo/deploy/*.py repo/tests/*.py
           node --check repo/deploy/acceptance-active.cjs
           node --check repo/deploy/acceptance-permitjoin.cjs
-          PYTHONPATH=repo/deploy python3 repo/tests/test_p009.py
+          PYTHONPATH=repo/deploy:repo/firmware python3 -m unittest discover -s repo/tests -p 'test_*.py' -v
           PYTHONPATH=repo/deploy python3 repo/deploy/p009_tool.py --help >/dev/null
           python3 repo/deploy/decode_ncp_counters.py --help >/dev/null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,14 +47,23 @@ jobs:
           repository: Nerivec/silabs-firmware-builder
           ref: 858c34b0eb6f53a2e0c89455ea489ceaa62d58db
           path: builder-p009
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Nerivec/silabs-firmware-builder
+          ref: 858c34b0eb6f53a2e0c89455ea489ceaa62d58db
+          path: builder-p009-repro
       - name: Verify and patch source
         run: |
           set -euo pipefail
           test "$(git -C repo rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git -C builder-stock rev-parse HEAD)" = "858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
-          test "$(git -C builder-p009 rev-parse HEAD)" = "858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
+          for d in builder-stock builder-p009 builder-p009-repro; do
+            test "$(git -C "$d" rev-parse HEAD)" = "858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
+          done
           python3 repo/firmware/patch_builder.py builder-p009
+          python3 repo/firmware/patch_builder.py builder-p009-repro
           git -C builder-p009 diff --check
+          git -C builder-p009-repro diff --check
+          diff -u builder-p009/src/zigbee_ncp/zigbee_ncp.slcp builder-p009-repro/src/zigbee_ncp/zigbee_ncp.slcp
       - name: Build pinned Silicon Labs toolchain container
         run: |
           set -euo pipefail
@@ -91,7 +100,34 @@ jobs:
           docker run --rm -v "$GITHUB_WORKSPACE/builder-p009:/repo" -w /repo p009-silabs-builder:9.1.1 \
             --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --output-dir outputs \
             --output gbl --output hex --output out --repo-owner analienx --repo-hash p009b64m32
-      - name: Capture generated build evidence
+      - name: Compile clean P009 reproducibility twin
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$GITHUB_WORKSPACE/builder-p009-repro:/repo" -w /repo p009-silabs-builder:9.1.1 \
+            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --output-dir outputs \
+            --output gbl --output hex --output out --repo-owner analienx --repo-hash p009b64m32
+      - name: Characterize reproducibility
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          def one(root, suffix):
+              xs=list(Path(root).glob(f"*{suffix}"))
+              if len(xs)!=1: raise SystemExit(f"{root}: expected one {suffix}, got {xs}")
+              p=xs[0]; return {"name":p.name,"bytes":p.stat().st_size,"sha256":hashlib.sha256(p.read_bytes()).hexdigest()}
+          a={s[1:]:one("builder-p009/outputs",s) for s in (".out",".hex",".gbl")}
+          b={s[1:]:one("builder-p009-repro/outputs",s) for s in (".out",".hex",".gbl")}
+          identical={k:a[k]["sha256"]==b[k]["sha256"] for k in a}
+          report={"schema":1,"same_toolchain_image":True,"same_source_and_patch":True,"first":a,"second":b,"byte_identical":identical}
+          Path("P009-REPRODUCIBILITY.json").write_text(json.dumps(report,indent=2,sort_keys=True)+"\n")
+          print(json.dumps(report,indent=2,sort_keys=True))
+          if not identical["out"]:
+              raise SystemExit("linked ELF is not reproducible across clean twin builds")
+          if not identical["hex"]:
+              raise SystemExit("HEX firmware content is not reproducible across clean twin builds")
+          PY
+      - name: Capture generated and linked build evidence
         run: |
           set -euo pipefail
           mkdir -p bundle/source-profile bundle/generated/p009 bundle/generated/rollback-stock bundle/linked
@@ -100,25 +136,18 @@ jobs:
           cp builder-p009/manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml bundle/source-profile/sonoff_dongle-m_zigbee_ncp.yaml
 
           capture_generated() {
-            root="$1"; dest="$2"
-            found_catalog=0
+            root="$1"; dest="$2"; count=0
             while IFS= read -r -d '' f; do
               rel="${f#${root}/}"
               mkdir -p "$dest/$(dirname "$rel")"
               cp "$f" "$dest/$rel"
-              case "$f" in
-                */sl_component_catalog.h) found_catalog=1 ;;
-              esac
+              count=$((count+1))
             done < <(find "$root/build" -type f \( \
-              -name '*.map' -o \
-              -name 'sl_component_catalog.h' -o \
-              -name '*_config.h' -o \
-              -name 'compile_commands.json' -o \
-              -name 'build.ninja' -o \
-              -name 'CMakeCache.txt' -o \
-              -name 'slc_project_info.json' \
+              -name '*.map' -o -name 'sl_component_catalog.h' -o -name '*_config.h' -o \
+              -name 'compile_commands.json' -o -name 'build.ninja' -o -name 'CMakeCache.txt' -o \
+              -name 'slc_project_info.json' -o -name '*.slcp' \
             \) -print0)
-            test "$found_catalog" = 1 || { echo "No sl_component_catalog.h captured from $root/build" >&2; exit 1; }
+            test "$count" -gt 0 || { echo "No generated build metadata captured from $root/build" >&2; exit 1; }
           }
           capture_generated builder-p009 bundle/generated/p009
           capture_generated builder-stock bundle/generated/rollback-stock
@@ -126,8 +155,10 @@ jobs:
           p009_out=$(find builder-p009/outputs -maxdepth 1 -type f -name '*.out' -print -quit)
           stock_out=$(find builder-stock/outputs -maxdepth 1 -type f -name '*.out' -print -quit)
           test -n "$p009_out" && test -n "$stock_out"
+          readelf -hW "$p009_out" > bundle/linked/P009-readelf-header.txt
           readelf -SW "$p009_out" > bundle/linked/P009-readelf-sections.txt
           readelf -sW "$p009_out" > bundle/linked/P009-readelf-symbols.txt
+          readelf -hW "$stock_out" > bundle/linked/STOCK-readelf-header.txt
           readelf -SW "$stock_out" > bundle/linked/STOCK-readelf-sections.txt
           readelf -sW "$stock_out" > bundle/linked/STOCK-readelf-symbols.txt
           find bundle/generated -type f -print | sort > bundle/generated/GENERATED-FILES.txt
@@ -139,8 +170,10 @@ jobs:
           cp builder-stock/outputs/* bundle/rollback-stock/
           cp repo/firmware/RESOURCE-PROFILE.md bundle/RESOURCE-PROFILE.md
           cp repo/docs/TUNING-RESEARCH.md bundle/TUNING-RESEARCH.md
+          cp repo/docs/SUPER-EXECUTOR-DISPOSITION.md bundle/SUPER-EXECUTOR-DISPOSITION.md
           cp P009-TOOLCHAIN-EVIDENCE.txt bundle/P009-TOOLCHAIN-EVIDENCE.txt
-          python3 repo/firmware/verify_build.py \
+          cp P009-REPRODUCIBILITY.json bundle/P009-REPRODUCIBILITY.json
+          python3 repo/firmware/verify_build_hardened.py \
             --p009-dir bundle/p009 --stock-dir bundle/rollback-stock \
             --p009-slcp bundle/source-profile/P009-patched-zigbee_ncp.slcp \
             --stock-slcp bundle/source-profile/STOCK-zigbee_ncp.slcp \
@@ -148,22 +181,31 @@ jobs:
             --source-commit "$GITHUB_SHA" \
             --output bundle/P009-BUILD-MANIFEST.json
           python3 - <<'PY'
-          import json
+          import hashlib, json
           from pathlib import Path
-          d = json.loads(Path("bundle/P009-BUILD-MANIFEST.json").read_text())
-          p = d["p009"]["artifacts"]["gbl"]
-          s = d["rollback_stock"]["artifacts"]["gbl"]
-          linked = d["linked_evidence"]
-          text = (
-              "P009 SONOFF Dongle-M / Dongle Max firmware bundle\n\n"
-              f"Source commit: {d['source']['repository_commit']}\n"
-              f"P009 GBL: {p['name']}\nP009 bytes: {p['bytes']}\nP009 SHA256: {p['sha256']}\n\n"
-              f"STOCK rollback GBL: {s['name']}\nSTOCK bytes: {s['bytes']}\nSTOCK SHA256: {s['sha256']}\n\n"
-              f"Linked .bss delta: {linked['bss_delta_bytes']} bytes\n"
-              f"Memory-manager heap reservation delta: {linked['memory_manager_heap_delta_bytes']} bytes\n\n"
-              "Artifact integrity does not prove what firmware is currently running on the NCP.\n"
-              "Flash is NOT authorized by this file alone. Run the hardened deploy/p009_tool.py arm first.\n"
-          )
+          mp=Path("bundle/P009-BUILD-MANIFEST.json")
+          d=json.loads(mp.read_text())
+          d["reproducibility"]=json.loads(Path("bundle/P009-REPRODUCIBILITY.json").read_text())
+          d["toolchain_evidence_sha256"]=hashlib.sha256(Path("bundle/P009-TOOLCHAIN-EVIDENCE.txt").read_bytes()).hexdigest()
+          d["generated_inventory_sha256"]=hashlib.sha256(Path("bundle/generated/GENERATED-FILES.txt").read_bytes()).hexdigest()
+          d["capabilities"]={
+              "profile_id":"P009-RX512-BTT64-KEY12-MCAST32",
+              "xncp_identity":False,
+              "p010_observability_separate_artifact":True,
+              "p009_runtime_policy_separate_artifact":True,
+              "transport":"EUSART1/115200/no-flow",
+              "linked_bss_delta_bytes":728,
+          }
+          mp.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
+          p=d["p009"]["artifacts"]["gbl"]; s=d["rollback_stock"]["artifacts"]["gbl"]; linked=d["linked_evidence"]
+          text=("P009 SONOFF Dongle-M / Dongle Max firmware bundle\n\n"
+                f"Source commit: {d['source']['repository_commit']}\n"
+                f"P009 GBL: {p['name']}\nP009 bytes: {p['bytes']}\nP009 SHA256: {p['sha256']}\n\n"
+                f"STOCK rollback GBL: {s['name']}\nSTOCK bytes: {s['bytes']}\nSTOCK SHA256: {s['sha256']}\n\n"
+                f"Linked .bss delta: {linked['bss_delta_bytes']} bytes\n"
+                f"Memory-manager heap reservation delta: {linked['memory_manager_heap_delta_bytes']} bytes\n\n"
+                "Artifact integrity does not prove which custom binary is currently running on the NCP.\n"
+                "Flash is NOT authorized by this file alone. Run deploy/p009_tool.py arm first.\n")
           Path("bundle/P009-DEPLOY.txt").write_text(text)
           PY
           (cd bundle && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS && sha256sum -c SHA256SUMS)
@@ -177,8 +219,9 @@ jobs:
             jq -r '"- **P009:** `\(.p009.artifacts.gbl.name)` — \(.p009.artifacts.gbl.bytes) bytes — `\(.p009.artifacts.gbl.sha256)`"' bundle/P009-BUILD-MANIFEST.json
             jq -r '"- **Stock rollback:** `\(.rollback_stock.artifacts.gbl.name)` — \(.rollback_stock.artifacts.gbl.bytes) bytes — `\(.rollback_stock.artifacts.gbl.sha256)`"' bundle/P009-BUILD-MANIFEST.json
             jq -r '"- **Linked `.bss` delta:** \(.linked_evidence.bss_delta_bytes) bytes; memory-manager reservation delta: \(.linked_evidence.memory_manager_heap_delta_bytes) bytes"' bundle/P009-BUILD-MANIFEST.json
+            jq -r '"- **Reproducible ELF/HEX:** \(.reproducibility.byte_identical.out)/\(.reproducibility.byte_identical.hex); GBL: \(.reproducibility.byte_identical.gbl)"' bundle/P009-BUILD-MANIFEST.json
             echo
-            echo "Generated configuration/build metadata, readelf evidence and toolchain provenance are bundled. Verify SHA256SUMS before ARM."
+            echo "Generated metadata, linked ELF evidence, toolchain provenance and reproducibility report are bundled."
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -269,6 +312,50 @@ jobs:
         with:
           name: sonoff-dongle-max-herdsman-p010-observability-10.9.1
           path: observability-bundle/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: error
+
+  config_audit:
+    name: Build read-only P009 effective-config audit overlay
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Koenkk/zigbee-herdsman
+          ref: 0968f979d558874b17396c96b66382d4236bbdcd
+          path: herdsman
+      - name: Apply and build read-only effective-config audit
+        run: |
+          set -euo pipefail
+          test "$(git -C herdsman rev-parse HEAD)" = "0968f979d558874b17396c96b66382d4236bbdcd"
+          python3 repo/runtime/patch_herdsman_config_audit.py herdsman
+          git -C herdsman diff --check
+          cd herdsman
+          corepack enable
+          corepack prepare pnpm@10.33.0 --activate
+          pnpm install --frozen-lockfile
+          pnpm run build
+          grep -F "[P009 CONFIG]" dist/adapter/ember/adapter/emberAdapter.js
+          grep -F "ezspGetConfigurationValue" dist/adapter/ember/adapter/emberAdapter.js
+          ! grep -F "[P009 EZSP]" dist/adapter/ember/adapter/emberAdapter.js
+          ! grep -F "[P010 PRESSURE]" dist/adapter/ember/adapter/emberAdapter.js
+      - name: Package config-audit overlay
+        run: |
+          set -euo pipefail
+          mkdir -p config-audit-bundle
+          cp herdsman/dist/adapter/ember/adapter/emberAdapter.js config-audit-bundle/
+          git -C herdsman diff --binary > config-audit-bundle/zigbee-herdsman-10.9.1-p009-config-audit.patch
+          cp repo/docs/CONFIG-AUDIT.md config-audit-bundle/README.md
+          (cd config-audit-bundle && sha256sum emberAdapter.js zigbee-herdsman-10.9.1-p009-config-audit.patch README.md > SHA256SUMS && sha256sum -c SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonoff-dongle-max-herdsman-p009-config-audit-10.9.1
+          path: config-audit-bundle/
           compression-level: 9
           retention-days: 30
           if-no-files-found: error

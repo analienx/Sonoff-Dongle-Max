@@ -6,9 +6,15 @@ import argparse
 import subprocess
 from pathlib import Path
 
+import p009_version
 from p009_common import DEFAULT_ADDON, DEFAULT_HOST, DEFAULT_REMOTE_TEMPLATE, DEFAULT_Z2M_DIR, configure_remote, die
 from p009_deploy import cmd_arm, cmd_confirm_flash, cmd_finalize, cmd_postflash, cmd_report, cmd_restore_data, cmd_snapshot, cmd_status
 from p009_accept import cmd_acceptance
+
+# Install only the structured snapshot/version-proof hooks. Command objects
+# imported above retain p009_deploy's module globals, so this does not replace or
+# fork the deployment state machine.
+p009_version.install()
 
 
 def parser() -> argparse.ArgumentParser:
