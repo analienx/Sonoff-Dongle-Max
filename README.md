@@ -1,16 +1,15 @@
-# SONOFF Dongle Max / Dongle-M — MG24 P009 firmware
+# SONOFF Dongle Max / Dongle-M — MG24 large-network firmware
 
-Experimental large-network firmware and controlled deployment tooling for the **SONOFF Dongle-M / Dongle Max** based on Silicon Labs **EFR32MG24A420F1536IM48**.
+Custom, evidence-driven firmware and deployment tooling for the **SONOFF Dongle-M / Dongle Max** (`EFR32MG24A420F1536IM48`) used with Zigbee2MQTT on a large production Zigbee network.
 
-The objective is narrow: keep the known-good network/radio/routing behavior, add sensible headroom where this production network has repeatedly returned `SLStatus.BUSY`, and make every deployment claim traceable to a specific binary and a current Zigbee2MQTT owner session.
+The project has one narrow production objective: address repeatable coordinator-originated group/broadcast `SLStatus.BUSY` without destabilizing the known-good radio, routing, network identity or normal direct-bound control path. Experimental improvements are kept as separately identified variants rather than silently folded into the production baseline.
 
-Engineering issue: https://github.com/analienx/Sonoff-Dongle-Max/issues/1
+- Engineering/root-cause history: https://github.com/analienx/Sonoff-Dongle-Max/issues/1
+- Independent architecture review: https://github.com/analienx/Sonoff-Dongle-Max/issues/7
+- Deployment operator gate: https://github.com/analienx/Sonoff-Dongle-Max/issues/6
+- Historical production investigation: https://github.com/analienx/home-assistant-stack/issues/47
 
-Architecture review: https://github.com/analienx/Sonoff-Dongle-Max/issues/7
-
-Historical production investigation: https://github.com/analienx/home-assistant-stack/issues/47
-
-## P009 firmware profile
+## Production candidate: frozen P009
 
 Pinned base:
 
@@ -22,124 +21,141 @@ EFR32MG24A420F1536IM48
 EUSART1
 115200 baud
 no hardware flow control
+builder Nerivec/silabs-firmware-builder@858c34b0eb6f53a2e0c89455ea489ceaa62d58db
 ```
 
-P009 changes **exactly four** compile-time values versus the matched stock rollback image:
+P009 changes **exactly three** compile-time values versus the matched stock rollback:
 
 | Resource | Stock | P009 | Purpose |
 |---|---:|---:|---|
-| EUSART VCOM RX buffer | 128 | **512** | Short host-to-NCP burst tolerance. |
+| EUSART VCOM RX buffer | 128 | **512** | Short host→NCP burst tolerance. |
 | Zigbee broadcast table | 30 | **64** | Primary broadcast-admission headroom hypothesis. |
-| Zigbee key table | 1 | **12** | Reasonable APS/link-key storage matching current MG24 production precedent. |
-| Zigbee multicast table | 26 | **32** | Six extra receive-membership slots for ~24 B linked RAM. |
+| Zigbee key table | 1 | **12** | Additional APS/link-key storage without changing network security material. |
+| Zigbee multicast table | **26** | **26** | Intentionally unchanged in P009. |
 
-Everything else in the retained large-network profile stays unchanged:
+Everything else in the retained MG24 profile stays unchanged, including route/source-route 254, address/APS 128, discovery16, neighbor26, binding32, compiled child capacity64, APS duplicate rejection64, HUGE packet-buffer heap and retry queue16.
 
-```text
-route table                     254
-source-route table              254
-address table                   128
-APS unicast messages            128
-discovery table                  16
-neighbor table                   26  # Silicon Labs maximum
-binding table                    32
-compiled max end-device children 64
-APS duplicate rejection          64
-packet-buffer heap              HUGE
-retry queue                      16
-```
-
-### Compile-time capacity is not always runtime policy
-
-The linked NCP contains capacity for 64 direct end-device children, but pinned stock zigbee-herdsman 10.9.1 normally attempts to set the **runtime maximum direct children to 32** unless `stack_config.json` changes it. Network size and direct-child count are not the same thing.
-
-Stock herdsman does **not** appear to rewrite P009's broadcast-table size 64 or key-table size 12 downward. Multicast capacity is firmware-side; herdsman consumes memberships but does not resize the table. The effective `NEW_BROADCAST_ENTRY_THRESHOLD` under the stock host remains a separate runtime admission-policy question. The prepared threshold-48 runtime overlay therefore must not be deployed merely because the binary has BTT64.
-
-## What the linked binary costs
-
-The pre-multicast hardening audit measured the three-delta P009 image at +704 B `.bss`. Promoting multicast 26→32 adds six 4-byte entries, so the current linked contract is:
+The linked contract is intentionally exact:
 
 | Quantity | Stock | P009 | Delta |
 |---|---:|---:|---:|
-| `.bss` proper | 22,284 B | 23,012 B | **+728 B** |
+| `.bss` proper | 22,284 B | 22,988 B | **+704 B** |
 | memory-manager reservation | 229,896 B | 229,896 B | 0 B |
 
-The expected +728 B static change is:
+The 229,896-B region is a linker reservation, **not measured free Zigbee packet memory**.
+
+See `firmware/RESOURCE-PROFILE.md` for the complete linked-symbol contract.
+
+## Why P009 exists
+
+Production evidence contains real group/broadcast-path `BUSY`, including operations such as `Kitchen Table Bulbs`, `Sockets Nonessential Shutdown` and `Lights All`. Coordinator-only permit controls were clean while network-wide Permit Join reproduced the same broad failure class.
+
+Broadcast/NWK admission pressure is therefore the leading hypothesis, but the project does not pretend that every BUSY is proven to be a full broadcast table. Other credible pressure branches include packet-buffer exhaustion, retry congestion, PHY/MAC queue pressure, RF contention, route/concentrator background work and host/callback backlog.
+
+That is why P009 increases only justified headroom and P010 exists as a separate diagnostic surface if BUSY remains.
+
+## Explicit variants and bundle components
+
+The final deliverable is a coherent **one-source-SHA release bundle**, not one ambiguous firmware image.
+
+### P011 — identity-only XNCP
+
+P011 starts from frozen P009 and preserves its Zigbee resource/transport values. It adds a small read-only XNCP identity command carrying compact source/profile identity.
+
+The build hashes a canonical semantic profile rather than the textual SLCP file, and stores a trusted-side record containing the full source SHA and full SHA-256. The wire response uses compact prefixes.
+
+P011 is **operational self-identification, not cryptographic remote attestation**. Stock Zigbee2MQTT must work normally if it ignores the extension. P011 is disabled by default.
+
+Issue: https://github.com/analienx/Sonoff-Dongle-Max/issues/8
+
+### P012 — watchdog/reset research
+
+The pinned NCP project does not explicitly select a watchdog component, and P009/P011/P013 do not silently add one.
+
+P012 is a required research/diagnostic bundle component whose production promotion remains blocked on a controlled spare-hardware test proving observable reset cause, single recovery without a reset loop and preserved network/NVM state.
+
+See `docs/P012-WATCHDOG-RESET.md` and issue #9.
+
+### P013 — multicast32 experiment
+
+P013 is P009 plus exactly:
 
 ```text
-RX buffer                         +384 B
-broadcast backing array           +272 B
-incoming APS/key counter metadata  +44 B
-multicast membership array         +24 B
-alignment/layout                     +4 B
+SL_ZIGBEE_MULTICAST_TABLE_SIZE 26 -> 32
 ```
 
-CI verifies those exact section and symbol sizes in the freshly linked ELF. The current GBL size/hash are taken from the successful CI artifact rather than copied forward from an older build.
+That costs 24 B linked `.bss` (`22,988 -> 23,012 B`). Separating it from P009 preserves a clean causal first test of the BUSY intervention while retaining a cheap future receive-membership headroom experiment. P013 is disabled by default.
 
-For this stack generation the broadcast backing array is **8 B per entry** and multicast membership storage is **4 B per entry**.
+### P010 — BUSY pressure observability
 
-The 229,896-B `.memory_manager_heap` reservation is **not a measurement of free Zigbee packet memory**. Runtime packet-pool acquisition, fragmentation, low-water marks and transient allocations are separate questions.
+P010 is a host-side diagnostic overlay. When the original send returns BUSY, it schedules a single-flight, rate-limited **read-only** NCP counter snapshot and propagates the original BUSY immediately. It does not retry the send, clear counters or change configuration.
 
-## Failure model
+Signals include broadcast-table-full, packet-buffer allocation failures, PHY→MAC queue saturation, NWK retry overflow, CCA and ASH errors.
 
-Production evidence contains real group/broadcast-path `BUSY`, not only Permit Join:
+### Host bulk lane
 
-```text
-Kitchen Table Bulbs             group 25
-Sockets Nonessential Shutdown   group 31
-Lights All                      group 8
-```
+`runtime/bulk_lane.py` is an offline/reference implementation for specific bulk automation paths. It is deliberately **not** a global Zigbee send delay. Guardrails include no hidden BUSY retries, no direct-binding latency changes and no unsafe coalescing of toggles/steps/safety OFF operations.
 
-Coordinator-only Permit Join controls were clean while network-wide Permit Join reproduced the same class of failure. This keeps broadcast/NWK admission pressure as the leading hypothesis.
+Issue: https://github.com/analienx/Sonoff-Dongle-Max/issues/10
 
-It is not proven that every BUSY was literally caused by a full broadcast table. Other credible admission-pressure branches include:
+The authoritative machine-readable component status is `release/COMPONENTS.json`.
 
-- local broadcast-entry threshold;
-- shared packet-buffer exhaustion;
-- PHY-to-MAC queue pressure;
-- NWK retry congestion;
-- callback/host transport backlog;
-- route/concentrator background work;
-- RF contention prolonging resource occupancy.
+## Compile-time capacity vs runtime policy
 
-P009 therefore increases justified capacity but keeps counter-based diagnostics available if BUSY remains.
+The NCP links capacity for 64 direct end-device children, but pinned stock zigbee-herdsman 10.9.1 normally asks for 32 unless `stack_config.json` overrides it. Network size and direct-child count are different quantities.
 
-## Why multicast32 is included directly
+Stock herdsman does not normally lower P009 BTT64 or KEY12. `NEW_BROADCAST_ENTRY_THRESHOLD` remains a separate runtime admission policy. The prepared threshold48 runtime overlay is therefore **not part of the first firmware-only deployment**.
 
-`SL_ZIGBEE_MULTICAST_TABLE_SIZE` is not a transmit queue. It tracks coordinator memberships used for receiving group traffic. Pinned herdsman consumes fixed memberships and dynamically registers application groups, so a network with roughly 21 groups has limited theoretical margin at 26 entries.
+## Transport contract
 
-A precise occupancy campaign would be possible, but 26→32 costs only about **24 B** of linked static RAM and does not alter routing, channel, PAN, keys, broadcast admission, transport, or transmit timing. That is sufficiently low-risk to take proactively rather than spending hours proving the exact current occupancy first.
-
-## Transport
-
-P009 keeps the SONOFF board contract:
+P009/P011/P013 keep the SONOFF board path:
 
 ```text
 EUSART1
-115200
+115200 baud
 no RTS/CTS
+RX buffer 512 B
 ```
 
-RX512 adds short-burst storage only. At 115200 8N1, nominal line rate is about 11,520 B/s: 128 B is ~11 ms of line-rate storage, while 512 B is ~44 ms. It does not raise sustained throughput or prove the ESP bridge cannot bottleneck.
+RX512 is short-burst storage only. At 115200 8N1 it is roughly 44 ms of line-rate capacity versus ~11 ms for RX128; it does not increase sustained throughput.
 
-Do not copy Nabu Casa ZBT-2's 460800/CTS-RTS settings onto the SONOFF board without end-to-end hardware proof.
+Do not copy a ZBT-2 460800/CTS-RTS profile onto Dongle-M without end-to-end proof through the SONOFF ESP bridge, physical pins and firmware.
 
-## Evidence layers
+## Evidence model
 
-This repository deliberately separates four different claims:
+The project deliberately separates:
 
-1. **Source profile** — what SLCP/manifest inputs requested.
-2. **Linked binary evidence** — what key objects/sections actually exist in the `.out` ELF.
-3. **Artifact integrity** — exact GBL/HEX/OUT hashes from one CI run.
-4. **Running-session evidence** — what the current Zigbee2MQTT owner reports after startup.
+1. source/profile intent;
+2. generated component/configuration evidence;
+3. linked ELF section/symbol assertions;
+4. GBL/HEX/OUT hashes and sizes;
+5. resolved CI toolchain/base-image provenance;
+6. owner-bound live Zigbee2MQTT/network evidence after startup.
 
-A copied SLCP is not called “effective configuration”. A manually acknowledged GBL SHA is not called device-side firmware attestation.
+A source SLCP is not “effective linked configuration.” An uploaded GBL hash is not device-side attestation. A bounded acceptance pass is not proof of long-term statistical reliability.
 
-The hardened build artifact contains source inputs, generated configuration/build metadata, `readelf` section/symbol reports, toolchain evidence, linked-object assertions and a schema-versioned build manifest. A linker `.map` is archived only if the pinned builder happens to emit one; it is not required because the linked ELF is the authoritative evidence.
+The upstream builder is Git-pinned, but its Dockerfile references mutable parent tags and live package repositories. Authoritative release CI therefore records the **resolved parent image digests and final builder image ID for the actual release run** instead of overstating eternal rebuild reproducibility.
+
+## Authoritative release CI
+
+`.github/workflows/build-release.yml` is the release gate. From one exact repository SHA it:
+
+- runs the entire offline regression suite;
+- builds matched stock rollback;
+- builds frozen P009 and a clean reproducibility twin;
+- builds P011 and verifies its linked XNCP identity surface;
+- builds P013 and verifies the only resource change is multicast26→32 / +24 B `.bss`;
+- archives generated build metadata and linked `readelf` evidence;
+- records resolved Docker/toolchain provenance;
+- builds P009 runtime, P010 observability and read-only config-audit host overlays against pinned zigbee-herdsman;
+- packages the host bulk-lane and P012 validation contract;
+- aggregates everything into one SHA-bound release candidate with recursive SHA256 inventory.
+
+The release manifest always states `flash_authorized: false`. CI success is a software/release gate, not permission to modify the live coordinator.
 
 ## Controlled deployment
 
-Deployment uses a persistent state machine:
+`deploy/p009_tool.py` owns the deployment state machine. It does **not** flash firmware itself.
 
 ```text
 ARMING
@@ -149,102 +165,63 @@ ARMING
   -> AUTOMATED_ACCEPTANCE_PASSED
   -> ACCEPTED
 
-Any failed/incomplete safety gate -> STOPPED
+any failed/incomplete safety gate -> STOPPED
 ```
 
-Important safeguards include:
+The hardened live proof binds:
 
-- exact source commit + build-manifest binding;
-- whole-bundle SHA256 verification;
-- exact P009 and matched stock-rollback GBL hashes/sizes;
-- exactly one expected HA Zigbee2MQTT add-on owner;
+- exact release source SHA and P009 manifest;
+- exact P009 + matched rollback GBL hash/size;
+- one exact Zigbee2MQTT HA add-on container;
 - current Docker container ID/start epoch;
-- current-session startup logs rather than an old log tail;
-- correlated Zigbee2MQTT health response requiring `status=ok` and `data.healthy=true`;
-- live network identity from current `bridge/info`;
-- network-key SHA256 computed inside the current owner container, never copied as plaintext;
-- stopped-state config/database/backup hashes and tar backup;
-- fail-fast acceptance with partial failure evidence persisted before STOP;
-- same-owner/start-epoch checks across acceptance and finalization.
+- a Zigbee2MQTT 2.14 **empty** `health_check` request with a non-retained healthy response observed after publication;
+- secret-safe `bridge/info` network identity;
+- network-key SHA-256 computed inside the owner container rather than exported in plaintext;
+- current backup metadata and stopped-state hashes;
+- current-session log windows;
+- same owner/session requirements through acceptance.
 
-Until a dedicated XNCP identity variant is implemented, post-flash evidence proves current generic EmberZNet 9.1.1/EZSP19 operation and unchanged network identity; the exact P009 binary remains tied to the human-selected, hash-verified artifact. Those are intentionally different claims.
+Post-flash P009 still has generic EmberZNet/EZSP identity; exact P009 binary selection remains tied to the hash-verified WebUI artifact. P011 exists precisely to improve future on-device custom-build self-identification.
 
 ## Bounded acceptance
 
 After the post-flash identity gate:
 
-1. exactly **16 completed unique** read-only transactions (2 × 8 targets), at least 15 successful;
-2. up to five serial 10-second Permit Join All trials; in a clean path exactly five, but **stop opening new windows on the first hard failure**;
-3. correlated final Permit Join close and a fresh `permit_join=false` observation;
-4. complete acceptance log window scanned for BUSY/message-pressure/reset/disconnect/network-down signatures;
-5. exactly two structured real-group checks with command result and human-verified physical result;
+1. exactly **16 completed unique** read-only canary transactions, at least 15 successful;
+2. up to five serial 10-second Permit Join All trials, with no new opening after the first hard failure;
+3. correlated/fresh final close evidence and `permit_join=false`;
+4. complete current log window scan for BUSY/pressure/reset/disconnect/network-down signatures;
+5. exactly two structured real-group checks with command and physical result;
 6. final current-session identity check.
 
-This is a bounded operational screen, **not statistical proof of long-term reliability**. If it passes, stop testing. If it fails, preserve the first failure and diagnose from evidence rather than adding retries or a parameter matrix.
+Reconnects cannot replay the stimulus sequence, malformed correlated responses fail the run, incomplete 15/15 cannot masquerade as 15/16, and failure evidence is persisted before STOP.
 
-## Optional runtime work
+If this bounded screen passes, stop testing. Do not turn it into a stress/parameter matrix.
 
-### P009 policy overlay
+## Safety invariants
 
-Prepared separately and **not part of the first firmware-only test**. It sets/readbacks:
+The production path does not perform:
 
-```text
-BROADCAST_TABLE_SIZE               64
-NEW_BROADCAST_ENTRY_THRESHOLD      48
-RETRY_QUEUE_SIZE                   16
-MTORR_FLOW_CONTROL                  1
-SUPPORTED_NETWORKS                  1
-SEND_MULTICASTS_TO_SLEEPY_ADDRESS  0
-```
-
-Because threshold 48 changes local-vs-relayed broadcast admission policy, the whole six-value overlay must not be deployed simply to “make firmware values stick”.
-
-### P010 observability overlay
-
-Diagnostic-only. On a residual group/broadcast BUSY it schedules one **non-blocking, single-flight, 5-second-coalesced** read-only counter snapshot behind the owner queue, while propagating the original BUSY immediately.
-
-It watches pressure counters such as:
-
-```text
-BROADCAST_TABLE_FULL
-ALLOCATE_PACKET_BUFFER_FAILURE
-PHY_TO_MAC_QUEUE_LIMIT_REACHED
-TYPE_NWK_RETRY_OVERFLOW
-PHY_CCA_FAIL_COUNT
-ASH_OVERFLOW/FRAMING/OVERRUN
-```
-
-It does not clear counters, retry a send or change configuration.
-
-## Next architecture: identity-only XNCP
-
-The architecture review recommends a small follow-up XNCP extension that reports deterministic project/board/schema/build/profile identity on request while remaining ignorable by stock Zigbee2MQTT. This should be a **new identifiable firmware variant**, not silently added to the already-reviewed P009 binary.
-
-The first XNCP version should remain identity-only; health fields should be added only where supported APIs and bounded response semantics are established.
-
-## What P009 deliberately does not do
-
-- no NVM clear or factory reset;
-- no network-key/PAN/extPAN/channel change;
-- no re-pairing requirement;
-- no RF-power experiment;
-- no route/source-route growth beyond 254;
-- no neighbor table above the hard maximum 26;
-- no forced runtime child64 without direct-child pressure;
-- no blanket BUSY retries;
-- no retry-queue enlargement;
-- no BTT254 “max everything” profile;
-- no threshold48 in the first stock-host test;
-- no ZBT-2 transport copy;
-- no deployment of P009 policy or P010 diagnostics during the first stock-host acceptance.
+- NVM clear or factory reset;
+- PAN/extPAN/channel/network-key change;
+- re-pairing;
+- RF-power experimentation;
+- neighbor table above hard max26;
+- route/source-route enlargement beyond254;
+- blanket BUSY retries;
+- retry-queue enlargement;
+- threshold48 during first stock-host P009 test;
+- automatic P010/P011/P012/P013 activation;
+- automatic host bulk-lane installation.
 
 ## Repository layout
 
-- `firmware/` — pinned source patch, resource contract, linked-image verifier.
-- `deploy/` — guarded state machine and bounded acceptance tooling.
-- `runtime/` — separate P009 policy and P010 diagnostic overlays.
-- `tests/` — regression tests for profiles, linked evidence and deployment gates.
-- `docs/` — research, special architecture review and executor runbook.
-- `.github/workflows/build-p009.yml` — P009 + matched rollback build and evidence bundle.
+- `firmware/` — P009/P011/P013 patches and linked-image verifiers.
+- `deploy/` — owner-bound deployment state machine and bounded acceptance.
+- `runtime/` — optional host runtime/observability/config-audit/bulk-lane components.
+- `tests/` — regression and release-contract tests.
+- `docs/` — architecture, tuning, watchdog/reset and executor runbooks.
+- `release/` — machine-readable bundle semantics/status.
+- `.github/workflows/build-release.yml` — authoritative one-SHA release CI.
 
-Current hardening work is performed on `p009-hardening`. Production flashing remains paused until the hardening build is fully green and its new artifact is reviewed.
+**Deployment issue #6 remains paused until the current release workflow is green and the resulting exact aggregate artifact has been inspected and pinned.**
