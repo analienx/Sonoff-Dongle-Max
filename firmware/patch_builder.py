@@ -38,13 +38,22 @@ def main() -> None:
         "  - name: SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE\n    value: 512\n    condition:\n      - iostream_eusart\n",
         "EUSART RX buffer",
     )
-    text = replace_once(text, "  - name: SL_ZIGBEE_BROADCAST_TABLE_SIZE\n    value: 30\n", "  - name: SL_ZIGBEE_BROADCAST_TABLE_SIZE\n    value: 64\n", "broadcast table")
-    text = replace_once(text, "  - name: SL_ZIGBEE_KEY_TABLE_SIZE\n    value: 1\n", "  - name: SL_ZIGBEE_KEY_TABLE_SIZE\n    value: 12\n", "key table")
-    text = replace_once(text, "  - name: SL_ZIGBEE_MULTICAST_TABLE_SIZE\n    value: 26\n", "  - name: SL_ZIGBEE_MULTICAST_TABLE_SIZE\n    value: 32\n", "multicast table")
+    text = replace_once(
+        text,
+        "  - name: SL_ZIGBEE_BROADCAST_TABLE_SIZE\n    value: 30\n",
+        "  - name: SL_ZIGBEE_BROADCAST_TABLE_SIZE\n    value: 64\n",
+        "broadcast table",
+    )
+    text = replace_once(
+        text,
+        "  - name: SL_ZIGBEE_KEY_TABLE_SIZE\n    value: 1\n",
+        "  - name: SL_ZIGBEE_KEY_TABLE_SIZE\n    value: 12\n",
+        "key table",
+    )
 
     invariants = {
         "EUSART RX buffer=512": r"- name: SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE\n\s+value: 512\n\s+condition:\n\s+- iostream_eusart",
-        "multicast=32": r"- name: SL_ZIGBEE_MULTICAST_TABLE_SIZE\n\s+value: 32",
+        "multicast remains stock=26": r"- name: SL_ZIGBEE_MULTICAST_TABLE_SIZE\n\s+value: 26",
         "discovery xg24=16": r"- name: SL_ZIGBEE_DISCOVERY_TABLE_SIZE\n\s+value: 16\n\s+condition: \[\"device_generic_family_efr32xg24\"\]",
         "neighbor=26": r"- name: SL_ZIGBEE_NEIGHBOR_TABLE_SIZE\n\s+value: 26",
         "binding=32": r"- name: SL_ZIGBEE_BINDING_TABLE_SIZE\n\s+value: 32",
@@ -71,6 +80,7 @@ def main() -> None:
     }
     for label, pattern in manifest_invariants.items():
         require(pattern, m, label)
+
     if text == original:
         raise SystemExit("patch produced no change")
     slcp.write_text(text, encoding="utf-8")
@@ -78,7 +88,7 @@ def main() -> None:
     print("  EUSART RX buffer: 128 -> 512")
     print("  broadcast table:  30 -> 64")
     print("  key table:         1 -> 12")
-    print("  multicast table:   26 -> 32")
+    print("  multicast table:   26 (unchanged; P013 owns 32)")
     print("  all other MG24 resource/transport invariants verified")
 
 
