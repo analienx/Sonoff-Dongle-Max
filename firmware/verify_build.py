@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Strict verifier for the P009 + stock rollback firmware bundle.
+"""Strict verifier for frozen P009 + matched stock rollback.
 
-The source profile and the linked image are deliberately verified as separate
-layers. A patched SLCP is not accepted as proof that the expected objects were
-actually generated and linked into the NCP.
+P009 is permanently the three-delta production baseline:
+RX128->512, BTT30->64 and KEY1->12. Multicast remains 26; P013 owns the
+separate multicast32 experiment.
 """
 from __future__ import annotations
 
@@ -19,7 +19,9 @@ BUILDER_PIN = "858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
 SDK = "2026.6.1"
 EMBER = "9.1.1"
 DEVICE = "EFR32MG24A420F1536IM48"
+
 COMMON_PROFILE = {
+    "SL_ZIGBEE_MULTICAST_TABLE_SIZE": 26,
     "SL_ZIGBEE_DISCOVERY_TABLE_SIZE": 16,
     "SL_ZIGBEE_NEIGHBOR_TABLE_SIZE": 26,
     "SL_ZIGBEE_BINDING_TABLE_SIZE": 32,
@@ -34,23 +36,17 @@ P009_ONLY = {
     "SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE": 512,
     "SL_ZIGBEE_BROADCAST_TABLE_SIZE": 64,
     "SL_ZIGBEE_KEY_TABLE_SIZE": 12,
-    "SL_ZIGBEE_MULTICAST_TABLE_SIZE": 32,
 }
 STOCK_ONLY = {
     "SL_IOSTREAM_EUSART_VCOM_RX_BUFFER_SIZE": 128,
     "SL_ZIGBEE_BROADCAST_TABLE_SIZE": 30,
     "SL_ZIGBEE_KEY_TABLE_SIZE": 1,
-    "SL_ZIGBEE_MULTICAST_TABLE_SIZE": 26,
 }
 PROFILE_NAMES = tuple(dict.fromkeys((*COMMON_PROFILE, *P009_ONLY, *STOCK_ONLY)))
 
-# These are linked-image facts for the pinned 2026.6.1/GCC14.2.1 build. The
-# multicast 26->32 promotion adds six 4-byte entries (+24 B), taking the prior
-# +704 B P009 delta to +728 B. CI intentionally fails if the linked image does
-# not match these exact expectations.
 LINKED_SECTION_EXPECTED = {
     "stock": {".bss": 22_284, ".memory_manager_heap": 229_896},
-    "p009": {".bss": 23_012, ".memory_manager_heap": 229_896},
+    "p009": {".bss": 22_988, ".memory_manager_heap": 229_896},
 }
 LINKED_SYMBOL_EXPECTED = {
     "stock": {
@@ -68,7 +64,7 @@ LINKED_SYMBOL_EXPECTED = {
         "sli_zigbee_broadcast_table_data": 512,
         "sli_zigbee_incoming_aps_frame_counters": 52,
         "sli_zigbee_retry_queue": 320,
-        "sli_zigbee_multicast_table": 128,
+        "sli_zigbee_multicast_table": 104,
         "sli_zigbee_source_route_table_data": 1016,
         "sli_zigbee_route_table": 2040,
         "sli_zigbee_child_table_data": 1560,
@@ -143,9 +139,8 @@ def validate_profile(actual: dict[str, int | str], expected_delta: dict[str, int
     expected: dict[str, int | str] = {**COMMON_PROFILE, **expected_delta}
     expected["SL_ZIGBEE_PACKET_BUFFER_HEAP_SIZE"] = "SL_ZIGBEE_HUGE_PACKET_BUFFER_HEAP"
     if actual != expected:
-        missing = {k: v for k, v in expected.items() if actual.get(k) != v}
-        unexpected = {k: v for k, v in actual.items() if k not in expected}
-        die(f"profile mismatch: expected_differences={missing}, unexpected={unexpected}")
+        mismatches = {k: (expected.get(k), actual.get(k)) for k in sorted(set(expected) | set(actual)) if expected.get(k) != actual.get(k)}
+        die(f"profile mismatch: {mismatches}")
 
 
 def validate_manifest(path: Path) -> dict[str, object]:
@@ -179,7 +174,6 @@ def _readelf(path: Path, flag: str) -> str:
 
 def readelf_sections(path: Path) -> dict[str, int]:
     out: dict[str, int] = {}
-    # readelf -SW columns: [Nr] Name Type Address Off Size ES Flg Lk Inf Al
     rx = re.compile(r"^\s*\[\s*\d+\]\s+(\S+)\s+\S+\s+[0-9a-fA-F]+\s+[0-9a-fA-F]+\s+([0-9a-fA-F]+)\s+", re.MULTILINE)
     for name, size_hex in rx.findall(_readelf(path, "-SW")):
         out[name] = int(size_hex, 16)
@@ -188,7 +182,6 @@ def readelf_sections(path: Path) -> dict[str, int]:
 
 def readelf_symbols(path: Path) -> dict[str, int]:
     out: dict[str, int] = {}
-    # Size is decimal in GNU readelf symbol output.
     rx = re.compile(r"^\s*\d+:\s+[0-9a-fA-F]+\s+(\d+)\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+?)\s*$", re.MULTILINE)
     for size, name in rx.findall(_readelf(path, "-sW")):
         clean = name.split("@", 1)[0]
@@ -216,10 +209,9 @@ def linked_evidence(stock_out: Path, p009_out: Path) -> dict[str, object]:
         report["symbols"][variant] = symbol_actual
     s_bss = report["sections"]["stock"][".bss"]
     p_bss = report["sections"]["p009"][".bss"]
-    expected_delta = 728
-    if p_bss - s_bss != expected_delta:
-        die(f"linked .bss delta must be {expected_delta} bytes, got {p_bss - s_bss}")
-    report["bss_delta_bytes"] = expected_delta
+    if p_bss - s_bss != 704:
+        die(f"linked .bss delta must be 704 bytes, got {p_bss - s_bss}")
+    report["bss_delta_bytes"] = 704
     report["memory_manager_heap_delta_bytes"] = 0
     report["validated"] = True
     return report
@@ -229,8 +221,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--p009-dir", type=Path, required=True)
     ap.add_argument("--stock-dir", type=Path, required=True)
-    ap.add_argument("--p009-slcp", type=Path, required=True, help="patched source-profile input; not proof of linked output")
-    ap.add_argument("--stock-slcp", type=Path, required=True, help="stock source-profile input; not proof of linked output")
+    ap.add_argument("--p009-slcp", type=Path, required=True)
+    ap.add_argument("--stock-slcp", type=Path, required=True)
     ap.add_argument("--manifest", type=Path, required=True)
     ap.add_argument("--source-commit", required=True)
     ap.add_argument("--output", type=Path, required=True)
@@ -266,6 +258,7 @@ def main() -> None:
         "source": {"repository": "analienx/Sonoff-Dongle-Max", "repository_commit": args.source_commit},
         "builder": {"repository": "Nerivec/silabs-firmware-builder", "commit": BUILDER_PIN},
         "firmware": {"emberznet": EMBER, "ezsp": 19, "transport": transport},
+        "profile_id": "P009-RX512-BTT64-KEY12-MCAST26",
         "source_profile_evidence": {
             "scope": "SLCP/source inputs only; linked_evidence is authoritative for measured object sizes",
             "p009": p_profile,
