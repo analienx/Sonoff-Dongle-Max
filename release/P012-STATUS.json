@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "profile": "P012",
+  "kind": "watchdog-reset-research",
+  "production_enabled": false,
+  "p009_watchdog_changed": false,
+  "verified_source_facts": {
+    "builder_commit": "858c34b0eb6f53a2e0c89455ea489ceaa62d58db",
+    "sdk": "2026.6.1",
+    "emberznet": "9.1.1",
+    "explicit_watchdog_component_selected_in_pinned_zigbee_ncp_slcp": false
+  },
+  "status": "requires-local-hardware-validation",
+  "promotion_gate": [
+    "source-proven watchdog component and feed ownership",
+    "distinct experimental firmware identity",
+    "measured linked flash/RAM delta",
+    "single controlled-hang recovery on non-production hardware",
+    "externally observable reset cause",
+    "no repeated reset loop",
+    "network/NVM state preserved",
+    "stock Zigbee2MQTT compatibility"
+  ],
+  "claims_not_yet_made": [
+    "watchdog recovery is production-safe",
+    "reset cause is reliably observable after all fault classes",
+    "watchdog should be enabled in P009"
+  ]
+}
