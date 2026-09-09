@@ -18,11 +18,15 @@ from decode_ncp_counters import decode_line, summary
 from p009_accept import parse_json_output, scan_hard_signatures, validate_active_result, validate_permit_result
 from p009_common import (
     BUILDER_PIN,
+    addon_container_candidates,
+    addon_state,
     appended_logs,
     compare_identity,
     configure_remote,
-    expected_addon_container,
+    find_gbl,
+    normalize_addon_info,
     operational_identity_from_bridge_info,
+    require_single_z2m_owner,
     remote_argv,
     safe_identity_from_backup_doc,
 )
@@ -93,7 +97,16 @@ class P009Tests(unittest.TestCase):
         self.assertEqual(remote_argv("ha", "echo ok"), ["ssh", "ha", "echo ok"])
         configure_remote("rtk proxy ssh {host} {command}")
         self.assertEqual(remote_argv("ha", "echo ok"), ["rtk", "proxy", "ssh", "ha", "echo ok"])
-        self.assertEqual(expected_addon_container("45df7312_zigbee2mqtt"), "addon_45df7312_zigbee2mqtt")
+        slug = "45df7312_zigbee2mqtt"
+        self.assertIn(f"app_{slug}", addon_container_candidates(slug, {"slug": slug}))
+        self.assertIn(f"addon_{slug}", addon_container_candidates(slug, {"slug": slug}))
+        with patch("p009_common.running_z2m_containers", return_value=[f"app_{slug}"]), patch("p009_common.addon_info", return_value={"slug": slug}):
+            self.assertEqual(require_single_z2m_owner("ha", slug), f"app_{slug}")
+        with patch("p009_common.running_z2m_containers", return_value=[f"rogue_{slug}"]), patch("p009_common.addon_info", return_value={"slug": slug}), patch("p009_common.remote_exec", return_value="{}"):
+            with self.assertRaises(SystemExit):
+                require_single_z2m_owner("ha", slug)
+        envelope = {"result": "ok", "data": {"state": "started", "version": "2.14.0-1", "slug": slug}}
+        self.assertEqual(addon_state(normalize_addon_info(envelope)), "started")
         with self.assertRaises(SystemExit):
             configure_remote("ssh ha")
 
@@ -126,6 +139,9 @@ class P009Tests(unittest.TestCase):
             validate_active_result(rec)
         rec = clean_active()
         rec["malformed_responses"] = 1
+        with self.assertRaises(RuntimeError):
+            validate_active_result(rec)
+        rec = clean_active(); rec["hard_events"] = [{"message": "NETWORK_DOWN"}]
         with self.assertRaises(RuntimeError):
             validate_active_result(rec)
         with self.assertRaises(RuntimeError):
@@ -175,10 +191,23 @@ class P009Tests(unittest.TestCase):
             self.assertIn("not device-side", saved["manual_flash"]["proof_scope"])
 
     def test_group_evidence_is_structured(self):
-        good = json.dumps({"group": "Lights All", "command": "OFF", "timestamp": "2026-09-08T20:00:00+02:00", "command_result": "Z2M accepted", "physical_result": "all selected loads off"})
+        good = json.dumps({"group": "Lights All", "command": "OFF", "timestamp": "2026-09-08T20:00:00+02:00", "command_result": "PASS", "physical_result": "PASS", "physical_observation": "selected loads visibly switched off"})
         self.assertEqual(parse_group_evidence(good)["group"], "Lights All")
+        bad = json.dumps({"group": "Lights All", "command": "OFF", "timestamp": "2026-09-08T20:00:00+02:00", "command_result": "failed", "physical_result": "not performed", "physical_observation": "none"})
+        with self.assertRaises(SystemExit):
+            parse_group_evidence(bad)
         with self.assertRaises(SystemExit):
             parse_group_evidence(json.dumps({"group": "x", "command": "OFF"}))
+
+    def test_release_rollback_directory_is_stock_rollback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            target = root / "stock-rollback" / "stock.gbl"
+            target.parent.mkdir()
+            target.write_bytes(b"gbl")
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            manifest = {"rollback_stock": {"artifacts": {"gbl": {"name": "stock.gbl", "sha256": digest, "bytes": 3}}}}
+            self.assertEqual(find_gbl(root, manifest, "stock"), target)
 
     def test_deployment_manifest_accepts_only_frozen_p009(self):
         with tempfile.TemporaryDirectory() as td:

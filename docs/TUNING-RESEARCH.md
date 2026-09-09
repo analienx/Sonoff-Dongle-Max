@@ -42,14 +42,14 @@ Credible alternatives/companions remain:
 
 ## 2. P009 profile
 
-P009 now changes exactly four values:
+P009 changes exactly three values:
 
 | Resource | Stock | P009 | Decision |
 |---|---:|---:|---|
 | EUSART RX buffer | 128 | **512** | keep |
 | Broadcast table | 30 | **64** | primary intervention |
 | Key table | 1 | **12** | keep |
-| Multicast table | 26 | **32** | low-cost membership headroom |
+| Multicast table | 26 | **26** | intentionally unchanged; 26 -> 32 is P013 only |
 
 Retained values:
 
@@ -85,7 +85,7 @@ Do not deploy threshold48 merely because BTT64 exists. Threshold changes admissi
 
 ## 4. Actual linked memory cost
 
-The architecture review independently parsed the matched stock/P009 ELF files before multicast32 was promoted. That three-delta image measured:
+The architecture review independently parsed the matched stock/P009 ELF files. The frozen three-delta P009 image measured:
 
 ```text
                                   stock        old P009   delta
@@ -97,30 +97,22 @@ The architecture review independently parsed the matched stock/P009 ELF files be
 .memory_manager_heap reservation 229,896     229,896         0 B
 ```
 
-The multicast32 promotion adds six 4-byte membership entries, so the current linked contract is:
+The frozen P009 linked contract therefore remains:
 
 ```text
-.bss proper                       22,284      23,012      +728 B
+.bss proper                       22,284      22,988      +704 B
 .memory_manager_heap reservation 229,896     229,896         0 B
 ```
 
-The expected +728 B `.bss` delta is:
+The expected +704 B `.bss` delta is the linked result of RX512, BTT64 and KEY12. Multicast storage remains 104 B / 26 entries in both stock and P009. The separate P013 experiment changes multicast 26 -> 32 and adds another 24 B (`22,988 -> 23,012 B`) without being part of the first production P009 test.
 
-```text
-RX buffer                                      +384 B
-broadcast table backing array                   +272 B
-incoming APS/key counter metadata                +44 B
-multicast table                                  +24 B
-alignment/layout                                  +4 B
-```
-
-For this binary generation:
+For frozen P009:
 
 ```text
 broadcast array stock: 240 B / 30 entries
 broadcast array P009:  512 B / 64 entries
 multicast array stock: 104 B / 26 entries
-multicast array P009:  128 B / 32 entries
+multicast array P009:  104 B / 26 entries
 ```
 
 CI verifies these exact linked sizes on the fresh build. If alignment or generated code changes unexpectedly, the artifact fails rather than requiring a separate Home Assistant evidence campaign.
@@ -142,13 +134,11 @@ This adds roughly 33 ms of short-burst tolerance. It does not increase sustained
 
 Keep SONOFF's EUSART1/115200/no-HW-flow contract unless end-to-end board/ESP support is proven.
 
-## 6. Multicast membership: promoted directly
+## 6. Multicast membership: isolated as P013
 
 The multicast table is not the number of groups the coordinator can transmit to. It is used for coordinator memberships/receive behavior.
 
-Pinned herdsman has fixed multicast memberships and adds application group memberships dynamically. With roughly 21 configured groups, a 26-entry table has limited theoretical margin. A production occupancy campaign would tell us the precise margin, but that information is not worth hours of work before taking a change that costs only ~24 B and does not alter routing or broadcast admission.
-
-Therefore P009 now uses **32** entries directly.
+Pinned herdsman has fixed multicast memberships and adds application group memberships dynamically. With roughly 21 configured groups, a 26-entry table may have limited theoretical margin, but changing it in P009 would confound the first causal BUSY test. Frozen P009 therefore remains at **26**. P013 is the isolated 26 -> 32 experiment and costs only +24 B linked `.bss`.
 
 This is the model to use for future tuning decisions:
 
@@ -246,9 +236,9 @@ Stock Zigbee2MQTT must remain able to ignore it. Do not copy Nabu Casa's entire 
 
 Prepared as P010, now non-blocking/rate-limited. Use only after a residual BUSY.
 
-### D — Multicast table 26→32: adopted
+### D — Multicast table 26→32: separate P013
 
-Promoted into P009 without an occupancy campaign because the linked cost is only ~24 B and the behavioral downside is negligible.
+Keep it isolated from the first P009 deployment. Its linked cost is only ~24 B, so P013 remains a cheap follow-up if membership headroom becomes relevant.
 
 ### E — Watchdog: conditional
 

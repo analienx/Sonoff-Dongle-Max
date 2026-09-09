@@ -96,8 +96,33 @@ def running_z2m_containers(host: str) -> list[str]:
     return [name.strip() for name in raw.splitlines() if "zigbee2mqtt" in name.lower()]
 
 
-def expected_addon_container(addon: str) -> str:
-    return addon if addon.startswith("addon_") else f"addon_{addon}"
+def addon_container_candidates(addon: str, info: dict[str, object] | None = None) -> set[str]:
+    info = info or {}
+    slug = str(info.get("slug") or addon).strip()
+    hostname = str(info.get("hostname") or "").strip()
+    seeds = {x for x in (slug, hostname) if x}
+    out = set(seeds)
+    for seed in seeds:
+        out.update({f"addon_{seed}", f"app_{seed}"})
+    return out
+
+
+def container_belongs_to_addon(host: str, container: str, addon: str, info: dict[str, object] | None = None) -> bool:
+    info = info or addon_info(host, addon)
+    if container in addon_container_candidates(addon, info):
+        return True
+    q = shlex.quote
+    try:
+        raw = remote_exec(host, f"docker inspect --format '{{{{json .Config.Labels}}}}' {q(container)}").strip()
+        labels = json.loads(raw) if raw else {}
+    except BaseException:
+        labels = {}
+    slug = str(info.get("slug") or addon).strip()
+    if isinstance(labels, dict) and slug:
+        for key, value in labels.items():
+            if isinstance(value, str) and value == slug and ("slug" in str(key).lower() or "hass" in str(key).lower()):
+                return True
+    return False
 
 
 def require_single_z2m_owner(host: str, addon: str | None = None) -> str:
@@ -106,9 +131,10 @@ def require_single_z2m_owner(host: str, addon: str | None = None) -> str:
         die(f"expected exactly one running Zigbee2MQTT container, found {containers}")
     container = containers[0]
     if addon is not None:
-        expected = expected_addon_container(addon)
-        if container != expected:
-            die(f"running Zigbee2MQTT owner is {container!r}, expected exact HA add-on container {expected!r}")
+        info = addon_info(host, addon)
+        if not container_belongs_to_addon(host, container, addon, info):
+            slug = info.get("slug") or addon
+            die(f"running Zigbee2MQTT owner is {container!r}, not the authoritative HA add-on slug {slug!r}")
     return container
 
 
@@ -244,6 +270,14 @@ def safe_identity_from_running_z2m(host: str, z2m_dir: str, addon: str = DEFAULT
     return identity
 
 
+def normalize_addon_info(doc: dict[str, object]) -> dict[str, object]:
+    data = doc.get("data")
+    result = doc.get("result")
+    if isinstance(data, dict) and result in ("ok", True, None):
+        return data
+    return doc
+
+
 def addon_info(host: str, addon: str) -> dict[str, object]:
     raw = remote_exec(host, f"ha addons info {shlex.quote(addon)} --raw-json")
     try:
@@ -252,7 +286,10 @@ def addon_info(host: str, addon: str) -> dict[str, object]:
         die(f"cannot parse add-on info: {exc}")
     if not isinstance(doc, dict):
         die("add-on info is not an object")
-    return doc
+    info = normalize_addon_info(doc)
+    if not isinstance(info, dict):
+        die("normalized add-on info is not an object")
+    return info
 
 
 def addon_state(info: dict[str, object]) -> str:
@@ -265,6 +302,22 @@ def addon_state(info: dict[str, object]) -> str:
 
 def addon_logs(host: str, addon: str) -> str:
     return remote_exec(host, f"ha addons logs {shlex.quote(addon)}")
+
+
+HARD_LOG_SIGNATURE = re.compile(
+    r"SLStatus\.BUSY|status=BUSY|\bBUSY\b|ZIGBEE_MAX_MESSAGE_LIMIT_REACHED|MAX_MESSAGE_LIMIT_REACHED|"
+    r"NO_BUFFERS|MESSAGE_TOO_LONG|NCP.*reset|ASH.*(?:error|reset)|adapter.*disconnected|NETWORK_DOWN",
+    re.IGNORECASE,
+)
+
+
+def scan_hard_log_signatures(text: str) -> list[str]:
+    return [line.strip()[:700] for line in text.splitlines() if HARD_LOG_SIGNATURE.search(line)]
+
+
+def container_logs_since(host: str, container: str, since: str) -> str:
+    q = shlex.quote
+    return remote_exec(host, f"docker logs --since {q(since)} {q(container)} 2>&1")
 
 
 def appended_logs(before: str, after: str) -> tuple[str, bool]:
@@ -290,8 +343,14 @@ def remote_hashes(host: str, z2m_dir: str) -> dict[str, str]:
 
 
 def version_lines_from_text(raw: str) -> list[str]:
-    rx = re.compile(r"Zigbee2MQTT|zigbee-herdsman|EmberZNet|\bEZSP\b|Coordinator|\[P009 EZSP\]|\[STACK STATUS\]", re.IGNORECASE)
-    return [line.strip()[:500] for line in raw.splitlines() if rx.search(line)][-150:]
+    direct = re.compile(r"EmberZNet|\bEZSP\b|\[P009 EZSP\]|\[STACK STATUS\]", re.IGNORECASE)
+    startup = re.compile(r"Zigbee2MQTT|zigbee-herdsman|Coordinator", re.IGNORECASE)
+    qualifier = re.compile(r"version|revision|starting|adapter|firmware", re.IGNORECASE)
+    out: list[str] = []
+    for line in raw.splitlines():
+        if direct.search(line) or (startup.search(line) and qualifier.search(line)):
+            out.append(line.strip()[:700])
+    return out
 
 
 def version_lines(host: str, addon: str) -> list[str]:
@@ -412,7 +471,7 @@ def validate_identity(identity: dict[str, object]) -> None:
 
 def find_gbl(bundle_root: Path, manifest: dict[str, object], variant: str) -> Path:
     section = "p009" if variant == "p009" else "rollback_stock"
-    rel_dir = "p009" if variant == "p009" else "rollback-stock"
+    rel_dir = "p009" if variant == "p009" else "stock-rollback"
     rec = (((manifest.get(section) or {}).get("artifacts") or {}).get("gbl") or {})
     path = bundle_root / rel_dir / str(rec.get("name"))
     if not path.is_file():

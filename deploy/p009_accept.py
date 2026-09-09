@@ -10,13 +10,6 @@ from datetime import datetime, timezone
 from p009_common import *  # noqa: F403
 from p009_deploy import PHASE_AUTO, PHASE_IDENTITY, require_phase, save_session, stop_session, validate_session_target
 
-HARD_SIGNATURE = re.compile(
-    r"SLStatus\.BUSY|status=BUSY|\bBUSY\b|ZIGBEE_MAX_MESSAGE_LIMIT_REACHED|MAX_MESSAGE_LIMIT_REACHED|"
-    r"NO_BUFFERS|MESSAGE_TOO_LONG|NCP.*reset|ASH.*(?:error|reset)|adapter.*disconnected|NETWORK_DOWN",
-    re.IGNORECASE,
-)
-
-
 def parse_json_output(text: str, label: str) -> dict[str, object]:
     try:
         doc = json.loads(text)
@@ -28,14 +21,7 @@ def parse_json_output(text: str, label: str) -> dict[str, object]:
 
 
 def scan_hard_signatures(text: str) -> list[str]:
-    return [line.strip()[:700] for line in text.splitlines() if HARD_SIGNATURE.search(line)]
-
-
-def require_exact_log_delta(before: str, after: str, label: str) -> tuple[str, list[str]]:
-    delta, exact = appended_logs(before, after)
-    if not exact:
-        raise RuntimeError(f"{label}: add-on log buffer no longer contains the exact acceptance prefix; safety evidence is incomplete")
-    return delta, scan_hard_signatures(delta)
+    return scan_hard_log_signatures(text)
 
 
 def validate_active_result(active: dict[str, object]) -> None:
@@ -50,9 +36,10 @@ def validate_active_result(active: dict[str, object]) -> None:
         )
     if not isinstance(successes, int) or successes < 15:
         raise RuntimeError(f"active canary success threshold failed: {successes}/16")
-    if active.get("global_timeout") is True or active.get("malformed_responses") not in (0, None):
+    hard_events = active.get("hard_events") or []
+    if active.get("global_timeout") is True or active.get("malformed_responses") not in (0, None) or hard_events:
         raise RuntimeError(
-            f"active canary evidence invalid: global_timeout={active.get('global_timeout')} malformed={active.get('malformed_responses')}"
+            f"active canary evidence invalid: global_timeout={active.get('global_timeout')} malformed={active.get('malformed_responses')} hard_events={hard_events[:3] if isinstance(hard_events, list) else hard_events}"
         )
     if active.get("ok") is not True:
         raise RuntimeError(f"active canary failed despite complete evidence: {successes}/16")
@@ -111,8 +98,10 @@ def cmd_acceptance(args: argparse.Namespace) -> None:
         remote_write_text(args.host, remote_permit, args.permit_script.read_text(encoding="utf-8"))
         start_owner = owner_epoch(args.host, args.addon)
         container = str(start_owner["container"])
-        logs_before = addon_logs(args.host, args.addon)
+        log_container = str(start_owner["container_id"])
+        log_since = str(evidence["started_utc"])
         evidence["owner_start"] = start_owner
+        evidence["log_capture"] = {"container_id": log_container, "since": log_since, "mode": "docker-owner-bound"}
         save_session(args.session, session)
 
         out1 = remote_exec(args.host, f"docker exec {shlex.quote(container)} node {shlex.quote(remote_active)}")
@@ -122,9 +111,9 @@ def cmd_acceptance(args: argparse.Namespace) -> None:
         save_session(args.session, session)
         validate_active_result(active)
 
-        logs_mid = addon_logs(args.host, args.addon)
-        active_delta, active_hard = require_exact_log_delta(logs_before, logs_mid, "active canary")
-        evidence["active_log_sha256"] = sha256_bytes(active_delta.encode("utf-8"))
+        active_window = container_logs_since(args.host, log_container, log_since)
+        active_hard = scan_hard_signatures(active_window)
+        evidence["active_log_sha256"] = sha256_bytes(active_window.encode("utf-8"))
         evidence["hard_log_lines"] = active_hard
         save_session(args.session, session)
         if active_hard:
@@ -144,9 +133,9 @@ def cmd_acceptance(args: argparse.Namespace) -> None:
         save_session(args.session, session)
         validate_permit_result(permit)
 
-        logs_after = addon_logs(args.host, args.addon)
-        full_delta, full_hard = require_exact_log_delta(logs_before, logs_after, "full acceptance window")
-        evidence["full_log_sha256"] = sha256_bytes(full_delta.encode("utf-8"))
+        full_window = container_logs_since(args.host, log_container, log_since)
+        full_hard = scan_hard_signatures(full_window)
+        evidence["full_log_sha256"] = sha256_bytes(full_window.encode("utf-8"))
         evidence["log_delta_exact"] = True
         evidence["hard_log_lines"] = full_hard
         save_session(args.session, session)

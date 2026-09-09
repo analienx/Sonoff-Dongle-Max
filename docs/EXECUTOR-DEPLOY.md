@@ -23,7 +23,7 @@ Historical comments/artifacts are evidence only. They are not deployment authori
 
 ## 1. Approved release gate
 
-The authoritative workflow is `.github/workflows/build-release.yml`. The exact approved source SHA must have a green aggregate release run in which:
+The authoritative workflow is `.github/workflows/release-final.yml`. The exact approved source SHA must have a green aggregate release run in which:
 
 - offline regression tests passed;
 - stock rollback + frozen P009 built in the same resolved toolchain image;
@@ -135,14 +135,15 @@ ARM must prove/capture:
 - firmware sub-bundle SHA256 inventory is valid;
 - exact P009 and stock rollback GBL SHA256 + byte sizes are valid;
 - manifest is frozen three-delta P009 with multicast26 and linked +704-B `.bss` proof;
-- exactly one running Zigbee2MQTT owner exists and is the expected HA add-on container;
+- exactly one running Zigbee2MQTT owner exists and is proven to belong to the authoritative HA add-on slug/metadata (current `app_...` or legacy `addon_...` naming is handled by the tool);
 - exact Docker container ID and `StartedAt` are captured;
-- approved EmberZNet 9.1.1 and EZSP19 are proven from structured coordinator/backup evidence with current-start-log fallback;
+- approved EmberZNet 9.1.1 and EZSP19 are proven from current structured `bridge/info` metadata when exposed, otherwise from exact current-start-epoch adapter logs; backup EZSP metadata alone is not current-runtime proof;
 - a fresh Zigbee2MQTT 2.14 health probe succeeds: the request payload is **empty**, the healthy response is non-retained and is observed after publication;
 - current coordinator IEEE/PAN/extPAN/channel come from secret-safe `bridge/info` fields;
 - the network-key plaintext remains on HA; only its SHA-256 fingerprint leaves the owner container;
 - stopped-state hashes for `configuration.yaml`, `database.db` and `coordinator_backup.json` are captured where present;
-- stopped-state backup is created and hashed;
+- stopped-state backup is created and hashed on HA;
+- an independent local copy is created outside HA and its SHA-256 must exactly match the HA archive;
 - Zigbee2MQTT is stopped and no residual owner remains;
 - session phase reaches exactly `ARMED`.
 
@@ -170,7 +171,7 @@ Post to issue #6 only secret-safe evidence:
 - owner container ID/start epoch;
 - coordinator IEEE/PAN/extPAN/channel;
 - network-key fingerprint, never key plaintext;
-- stopped backup path/SHA256;
+- stopped backup path/SHA256 plus independent local-copy path/SHA256;
 - confirmation Zigbee2MQTT is stopped and no residual owner exists.
 
 Then **STOP. Do not flash.** The supervisor must inspect ARMED evidence and issue a separate authorization for that exact P009 hash.
@@ -266,7 +267,7 @@ Pass requires all of:
 
 `15/15` is not a pass. Reconnect cannot replay a second stimulus sequence.
 
-Before Permit Join starts, the exact active-phase log delta is checked for hard BUSY/message-pressure/reset/disconnect signatures. A hard signature stops the run immediately.
+Before Permit Join starts, an owner-ID/start-epoch-bound Docker log window is checked for hard BUSY/message-pressure/reset/disconnect signatures. A hard signature stops the run immediately; rolling add-on log-prefix continuity is not used as the safety primitive.
 
 ### Permit Join All
 
@@ -281,7 +282,7 @@ no executor-added retry
 
 On the first failed trial no further open window is scheduled.
 
-Cleanup always attempts a final `time:0` close and requires a fresh `permit_join=false` observation. Log-window loss/rotation fails the gate rather than becoming a warning. The same Docker owner/start epoch must own the whole bounded acceptance.
+Any hard BUSY/reset/ASH/disconnect/network-down event immediately requests `time:0` closure and prevents further opening stimulus. Cleanup still performs a final close and requires a **non-retained**, fresh `permit_join=false` observation. The same Docker owner/start epoch must own the whole bounded acceptance.
 
 Clean phase: `AUTOMATED_ACCEPTANCE_PASSED`.
 
@@ -294,15 +295,18 @@ Each evidence record must contain non-empty:
 ```text
 group
 command
-timestamp
-command_result
-physical_result
+timestamp              # timezone-qualified ISO-8601, after automated acceptance
+command_result          # exactly PASS
+physical_result         # exactly PASS
+physical_observation    # human description of what was actually observed
 ```
+
+The two records must name two distinct groups. Finalize also scans the same owner/container log interval covering these physical checks and refuses acceptance on BUSY/reset/ASH/disconnect/network-down evidence.
 
 Example:
 
 ```json
-{"group":"Lights All","command":"OFF","timestamp":"2026-09-08T20:00:00+02:00","command_result":"Z2M accepted","physical_result":"selected loads switched off"}
+{"group":"Lights All","command":"OFF","timestamp":"2026-09-09T11:40:00+02:00","command_result":"PASS","physical_result":"PASS","physical_observation":"selected room lights visibly switched off"}
 ```
 
 Finalize:
@@ -340,7 +344,7 @@ Stop immediately on any of:
 - NCP/ASH reset/disconnect/NETWORK_DOWN;
 - malformed/incomplete MQTT evidence;
 - Permit Join closure not freshly proven;
-- log-window loss/rotation.
+- inability to obtain the owner-bound Docker log evidence window.
 
 Do not retry by adding delays, retries, tuning or extra diagnostic traffic after a hard stop.
 
@@ -366,7 +370,7 @@ python deploy/p009_tool.py `
   --confirm P009-RESTORE-DATA
 ```
 
-The restore validates the backup hash, quarantines failed data and revalidates core-file hashes.
+The restore validates the backup hash, quarantines failed data and revalidates core-file hashes. This archive is Zigbee2MQTT data recovery only; it is **not** a bit-for-bit Dongle-M ESP/NVM/bootloader recovery image. Preserve the SONOFF ESP settings/NVM during the in-place radio firmware update.
 
 ## Reporting
 

@@ -49,15 +49,26 @@ function addEvent(kind, message) {
   events.push({at: Date.now(), kind, message: String(message).slice(0, 500)});
   if (events.length > 800) events.shift();
 }
-function pressureEvents(slice) {
-  return slice.filter((e) => /BUSY|MAX_MESSAGE_LIMIT_REACHED|NO_BUFFERS|MESSAGE_TOO_LONG/i.test(e.message));
+const HARD = /SLStatus\.BUSY|status=BUSY|\bBUSY\b|ZIGBEE_MAX_MESSAGE_LIMIT_REACHED|MAX_MESSAGE_LIMIT_REACHED|NO_BUFFERS|MESSAGE_TOO_LONG|NCP.*reset|ASH.*(?:error|reset)|adapter.*disconnected|NETWORK_DOWN/i;
+let emergencyCloseRequested = false;
+function hardEvents(slice) {
+  return slice.filter((e) => HARD.test(e.message));
+}
+function requestImmediateClose(reason) {
+  if (emergencyCloseRequested || finished) return;
+  emergencyCloseRequested = true;
+  const transaction = `p009-emergency-close-${Date.now()}`;
+  addEvent("emergency_close", `${reason} tx=${transaction}`);
+  client.publish(REQ, JSON.stringify({time: 0, transaction}), {qos: 1}, (err) => {
+    if (err) addEvent("emergency_close_publish_error", err.message);
+  });
 }
 
-client.on("message", (topic, raw) => {
+client.on("message", (topic, raw, packet) => {
   if (topic === INFO) {
     try {
       const v = JSON.parse(raw.toString());
-      lastInfo = {permit_join: v.permit_join, permit_join_end: v.permit_join_end ?? null, at: Date.now()};
+      lastInfo = {permit_join: v.permit_join, permit_join_end: v.permit_join_end ?? null, at: Date.now(), retained: !!packet?.retain};
       addEvent("bridge_info", `permit_join=${String(v.permit_join)} permit_join_end=${String(v.permit_join_end ?? null)}`);
     } catch (e) {
       malformed.push({at: Date.now(), topic, error: e.message});
@@ -70,6 +81,7 @@ client.on("message", (topic, raw) => {
       if (/BUSY|MAX_MESSAGE_LIMIT_REACHED|NO_BUFFERS|MESSAGE_TOO_LONG|0xfffc|0xfffd|permit.?join|NETWORK_DOWN|ASH|reset|disconnected/i.test(msg)) {
         addEvent("z2m_log", `${v.level}: ${msg}`);
       }
+      if (HARD.test(msg)) requestImmediateClose(`hard runtime event: ${msg.slice(0, 180)}`);
     } catch (e) {
       malformed.push({at: Date.now(), topic, error: e.message});
       addEvent("malformed", `${topic}: ${e.message}`);
@@ -110,7 +122,7 @@ function requestPermit(payload, transaction, timeoutMs = 10000) {
 async function waitForFreshPermitFalse(notBefore, timeoutMs = 7000) {
   const until = Date.now() + remaining(timeoutMs);
   while (Date.now() < until) {
-    if (lastInfo && lastInfo.at >= notBefore && lastInfo.permit_join === false) return {...lastInfo};
+    if (lastInfo && lastInfo.at >= notBefore && lastInfo.permit_join === false && lastInfo.retained === false) return {...lastInfo};
     await sleep(150);
   }
   return null;
@@ -126,13 +138,16 @@ async function one(t) {
   const response = await requestPermit(payload, transaction, 10000);
   const responseAt = Date.now();
   const expectedEnd = startedAt + SECONDS * 1000;
-  if (Date.now() < expectedEnd + 1200) await sleep(remaining(expectedEnd + 1200 - Date.now()));
-  const permitAfter = await waitForFreshPermitFalse(expectedEnd - 500, 7000);
+  const immediateHard = hardEvents(events.slice(eventStart)).length > 0;
+  if (!immediateHard && Date.now() < expectedEnd + 1200) await sleep(remaining(expectedEnd + 1200 - Date.now()));
+  const closureNotBefore = immediateHard ? startedAt : expectedEnd - 500;
+  const permitAfter = await waitForFreshPermitFalse(closureNotBefore, 7000);
   const evidence = events.slice(eventStart);
-  const pressure = pressureEvents(evidence);
+  const hard = hardEvents(evidence);
+  const pressure = hard.filter((e) => /BUSY|MAX_MESSAGE_LIMIT_REACHED|NO_BUFFERS|MESSAGE_TOO_LONG/i.test(e.message));
   const statusOk = response?.status === "ok";
-  const freshClosed = permitAfter?.permit_join === false;
-  const ok = statusOk && pressure.length === 0 && freshClosed && malformed.length === 0;
+  const freshClosed = permitAfter?.permit_join === false && permitAfter?.retained === false;
+  const ok = statusOk && hard.length === 0 && freshClosed && malformed.length === 0;
   const rec = {
     kind: t.kind,
     ordinal: t.ordinal,
@@ -144,6 +159,7 @@ async function one(t) {
     fresh_permit_false: freshClosed,
     permit_after: permitAfter,
     pressure,
+    hard,
     evidence,
   };
   results.push(rec);
@@ -245,5 +261,19 @@ setTimeout(() => {
   if (!finished) {
     globalTimedOut = true;
     addEvent("global_timeout", "180s deadline reached");
+    requestImmediateClose("global deadline reached");
+    if (!started) {
+      finished = true;
+      console.log(JSON.stringify({test: "P009 permit join", ok: false, hard_stop: "MQTT connect/subscribe did not start before 180s deadline", global_timeout: true, results: [], cleanup: null, event_log: events}, null, 2));
+      client.end(true, {}, () => process.exit(0));
+    }
   }
 }, 180000);
+setTimeout(() => {
+  if (!finished) {
+    finished = true;
+    addEvent("forced_exit", "195s absolute process bound reached after best-effort cleanup window");
+    console.log(JSON.stringify({test: "P009 permit join", ok: false, hard_stop: "absolute process deadline", global_timeout: true, results, event_log: events}, null, 2));
+    client.end(true, {}, () => process.exit(2));
+  }
+}, 195000);

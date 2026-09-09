@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import re
 import shlex
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from p009_common import *  # noqa: F403
@@ -145,7 +146,24 @@ def cmd_arm(args: argparse.Namespace) -> None:
         m = re.match(r"([0-9a-f]{64})\s+(.+)", remote)
         if not m:
             raise RuntimeError(f"could not verify stopped-state backup: {remote!r}")
-        session["stopped_state_backup"] = {"remote_path": tar_path, "sha256": m.group(1), "file_sha256": stopped_hashes}
+        backup_copy_dir = args.session.parent / "backup-copy"
+        backup_copy_dir.mkdir(parents=True, exist_ok=True)
+        local_backup = backup_copy_dir / f"{stamp}-zigbee2mqtt.tgz"
+        encoded = remote_exec(args.host, f"base64 {q(tar_path)}")
+        try:
+            local_backup.write_bytes(base64.b64decode("".join(encoded.split()), validate=True))
+        except BaseException as exc:
+            raise RuntimeError(f"could not create independent local stopped-state backup copy: {exc}") from exc
+        local_hash = sha256_file(local_backup)
+        if local_hash != m.group(1):
+            raise RuntimeError(f"independent backup-copy hash mismatch: remote={m.group(1)} local={local_hash}")
+        session["stopped_state_backup"] = {
+            "remote_path": tar_path,
+            "sha256": m.group(1),
+            "file_sha256": stopped_hashes,
+            "independent_local_path": str(local_backup.resolve()),
+            "independent_local_sha256": local_hash,
+        }
         session["phase"] = PHASE_ARMED
         save_session(args.session, session)
     except BaseException as exc:
@@ -161,6 +179,7 @@ def cmd_arm(args: argparse.Namespace) -> None:
     print(f"Stock rollback:  {stock_gbl}")
     print(f"Backup on HA:    {tar_path}")
     print(f"Backup SHA256:   {m.group(1)}")
+    print(f"Independent copy: {local_backup}")
     print("Zigbee2MQTT remains STOPPED. Flash only the exact P009 GBL above through the proven WebUI.")
 
 
@@ -274,11 +293,22 @@ def parse_group_evidence(text: str) -> dict[str, object]:
         die(f"--group-evidence must be a JSON object: {exc}")
     if not isinstance(doc, dict):
         die("--group-evidence must be a JSON object")
-    required = ("group", "command", "timestamp", "command_result", "physical_result")
+    required = ("group", "command", "timestamp", "command_result", "physical_result", "physical_observation")
     missing = [k for k in required if not isinstance(doc.get(k), str) or not str(doc.get(k)).strip()]
     if missing:
         die(f"group evidence missing non-empty string fields: {missing}")
     doc = {k: str(v).strip()[:1000] if isinstance(v, str) else v for k, v in doc.items()}
+    for field in ("command_result", "physical_result"):
+        if str(doc[field]).upper() != "PASS":
+            die(f"group evidence {field} must be exactly PASS, got {doc[field]!r}")
+    raw_ts = str(doc["timestamp"])
+    try:
+        parsed = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+    except ValueError as exc:
+        die(f"group evidence timestamp must be ISO-8601: {exc}")
+    if parsed.tzinfo is None:
+        die("group evidence timestamp must include a timezone offset")
+    doc["timestamp_utc"] = parsed.astimezone(timezone.utc).isoformat()
     return doc
 
 
@@ -291,6 +321,23 @@ def cmd_finalize(args: argparse.Namespace) -> None:
     if len(args.group_evidence) != 2:
         die("finalize requires exactly two --group-evidence JSON objects")
     groups = [parse_group_evidence(x) for x in args.group_evidence]
+    if len({str(g["group"]).casefold() for g in groups}) != 2:
+        die("finalize requires two distinct representative groups")
+    acceptance = session.get("acceptance") or {}
+    gate_end_raw = acceptance.get("completed_utc") if isinstance(acceptance, dict) else None
+    if not isinstance(gate_end_raw, str):
+        die("finalize requires automated-acceptance completion timestamp")
+    try:
+        gate_end = datetime.fromisoformat(gate_end_raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError as exc:
+        die(f"automated-acceptance completion timestamp is malformed: {exc}")
+    now = datetime.now(timezone.utc)
+    group_times = [datetime.fromisoformat(str(g["timestamp_utc"])) for g in groups]
+    if any(ts < gate_end for ts in group_times):
+        die("group evidence predates completion of automated acceptance")
+    if any(ts > now + timedelta(seconds=30) for ts in group_times):
+        die("group evidence timestamp is implausibly in the future")
+    group_log_since = (min(group_times) - timedelta(seconds=5)).isoformat()
     try:
         final_snapshot = snapshot(args.host, args.addon, args.z2m_dir)
         validate_identity(final_snapshot["identity"])
@@ -302,6 +349,17 @@ def cmd_finalize(args: argparse.Namespace) -> None:
         final_owner = (final_snapshot.get("identity_evidence") or {}).get("owner") or {}
         if (post_owner.get("container_id"), post_owner.get("started_at")) != (final_owner.get("container_id"), final_owner.get("started_at")):
             raise RuntimeError(f"Z2M owner/start epoch changed between postflash and finalize: post={post_owner} final={final_owner}")
+        group_logs = container_logs_since(args.host, str(final_owner.get("container_id") or ""), group_log_since)
+        group_hard = scan_hard_log_signatures(group_logs)
+        session["group_log_evidence"] = {
+            "container_id": final_owner.get("container_id"),
+            "since": group_log_since,
+            "sha256": sha256_bytes(group_logs.encode("utf-8")),
+            "hard_log_lines": group_hard,
+        }
+        save_session(args.session, session)
+        if group_hard:
+            raise RuntimeError("hard NCP/message-pressure signature during physical group interval: " + " | ".join(group_hard[-10:]))
     except BaseException as exc:
         stop_session(args.session, session, f"finalization safety gate failed: {exc}", args.host, args.addon, stop_addon=True)
         die(f"finalize STOP; Z2M stopped and session marked STOPPED: {exc}")

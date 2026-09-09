@@ -92,20 +92,20 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm -v "$GITHUB_WORKSPACE/builder-stock:/repo" -w /repo p009-silabs-builder:9.1.1 \
-            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --output-dir outputs \
+            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --no-clean-build-dir --output-dir outputs \
             --output gbl --output hex --output out --repo-owner analienx --repo-hash stock911
       - name: Compile P009
         run: |
           set -euo pipefail
           docker run --rm -v "$GITHUB_WORKSPACE/builder-p009:/repo" -w /repo p009-silabs-builder:9.1.1 \
-            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --output-dir outputs \
-            --output gbl --output hex --output out --repo-owner analienx --repo-hash p009b64m32
+            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --no-clean-build-dir --output-dir outputs \
+            --output gbl --output hex --output out --repo-owner analienx --repo-hash p009rx512b64k12
       - name: Compile clean P009 reproducibility twin
         run: |
           set -euo pipefail
           docker run --rm -v "$GITHUB_WORKSPACE/builder-p009-repro:/repo" -w /repo p009-silabs-builder:9.1.1 \
-            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --output-dir outputs \
-            --output gbl --output hex --output out --repo-owner analienx --repo-hash p009b64m32
+            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --no-clean-build-dir --output-dir outputs \
+            --output gbl --output hex --output out --repo-owner analienx --repo-hash p009rx512b64k12
       - name: Characterize reproducibility
         run: |
           set -euo pipefail
@@ -130,7 +130,7 @@ jobs:
       - name: Capture generated and linked build evidence
         run: |
           set -euo pipefail
-          mkdir -p bundle/source-profile bundle/generated/p009 bundle/generated/rollback-stock bundle/linked
+          mkdir -p bundle/source-profile bundle/generated/p009 bundle/generated/stock-rollback bundle/linked
           cp builder-p009/src/zigbee_ncp/zigbee_ncp.slcp bundle/source-profile/P009-patched-zigbee_ncp.slcp
           cp builder-stock/src/zigbee_ncp/zigbee_ncp.slcp bundle/source-profile/STOCK-zigbee_ncp.slcp
           cp builder-p009/manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml bundle/source-profile/sonoff_dongle-m_zigbee_ncp.yaml
@@ -150,7 +150,7 @@ jobs:
             test "$count" -gt 0 || { echo "No generated build metadata captured from $root/build" >&2; exit 1; }
           }
           capture_generated builder-p009 bundle/generated/p009
-          capture_generated builder-stock bundle/generated/rollback-stock
+          capture_generated builder-stock bundle/generated/stock-rollback
 
           p009_out=$(find builder-p009/outputs -maxdepth 1 -type f -name '*.out' -print -quit)
           stock_out=$(find builder-stock/outputs -maxdepth 1 -type f -name '*.out' -print -quit)
@@ -165,16 +165,16 @@ jobs:
       - name: Assemble and verify bundle
         run: |
           set -euo pipefail
-          mkdir -p bundle/p009 bundle/rollback-stock
+          mkdir -p bundle/p009 bundle/stock-rollback
           cp builder-p009/outputs/* bundle/p009/
-          cp builder-stock/outputs/* bundle/rollback-stock/
+          cp builder-stock/outputs/* bundle/stock-rollback/
           cp repo/firmware/RESOURCE-PROFILE.md bundle/RESOURCE-PROFILE.md
           cp repo/docs/TUNING-RESEARCH.md bundle/TUNING-RESEARCH.md
           cp repo/docs/SUPER-EXECUTOR-DISPOSITION.md bundle/SUPER-EXECUTOR-DISPOSITION.md
           cp P009-TOOLCHAIN-EVIDENCE.txt bundle/P009-TOOLCHAIN-EVIDENCE.txt
           cp P009-REPRODUCIBILITY.json bundle/P009-REPRODUCIBILITY.json
           python3 repo/firmware/verify_build_hardened.py \
-            --p009-dir bundle/p009 --stock-dir bundle/rollback-stock \
+            --p009-dir bundle/p009 --stock-dir bundle/stock-rollback \
             --p009-slcp bundle/source-profile/P009-patched-zigbee_ncp.slcp \
             --stock-slcp bundle/source-profile/STOCK-zigbee_ncp.slcp \
             --manifest bundle/source-profile/sonoff_dongle-m_zigbee_ncp.yaml \
@@ -189,12 +189,12 @@ jobs:
           d["toolchain_evidence_sha256"]=hashlib.sha256(Path("bundle/P009-TOOLCHAIN-EVIDENCE.txt").read_bytes()).hexdigest()
           d["generated_inventory_sha256"]=hashlib.sha256(Path("bundle/generated/GENERATED-FILES.txt").read_bytes()).hexdigest()
           d["capabilities"]={
-              "profile_id":"P009-RX512-BTT64-KEY12-MCAST32",
+              "profile_id":"P009-RX512-BTT64-KEY12-MCAST26",
               "xncp_identity":False,
               "p010_observability_separate_artifact":True,
               "p009_runtime_policy_separate_artifact":True,
               "transport":"EUSART1/115200/no-flow",
-              "linked_bss_delta_bytes":728,
+              "linked_bss_delta_bytes":704,
           }
           mp.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
           p=d["p009"]["artifacts"]["gbl"]; s=d["rollback_stock"]["artifacts"]["gbl"]; linked=d["linked_evidence"]

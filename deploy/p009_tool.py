@@ -67,7 +67,7 @@ def parser() -> argparse.ArgumentParser:
         default=[],
         help=(
             'repeat exactly twice; JSON object with non-empty string fields '
-            'group, command, timestamp, command_result, physical_result'
+            'group, command, timestamp, command_result=PASS, physical_result=PASS, physical_observation'
         ),
     )
     fn.add_argument("--confirm", required=True)

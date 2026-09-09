@@ -28,6 +28,8 @@ const targets = [
 ];
 const RESP = `${base}/bridge/response/device/reporting/read`;
 const REQ = `${base}/bridge/request/device/reporting/read`;
+const LOGGING = `${base}/bridge/logging`;
+const HARD = /SLStatus\.BUSY|status=BUSY|\bBUSY\b|ZIGBEE_MAX_MESSAGE_LIMIT_REACHED|MAX_MESSAGE_LIMIT_REACHED|NO_BUFFERS|MESSAGE_TOO_LONG|NCP.*reset|ASH.*(?:error|reset)|adapter.*disconnected|NETWORK_DOWN/i;
 const EXPECTED = targets.length * 2;
 const client = mqtt.connect(config.mqtt.server, {
   username: config.mqtt?.user,
@@ -45,6 +47,7 @@ let globalTimedOut = false;
 let malformedResponses = 0;
 let reconnects = 0;
 let initialConnectSeen = false;
+const hardEvents = [];
 
 function recordCurrentFailure(error) {
   if (!waiter) return;
@@ -58,6 +61,7 @@ function recordCurrentFailure(error) {
     error,
   });
   waiter = null;
+  if (HARD.test(String(error || "")) || /^malformed/i.test(String(error || ""))) return finish(`hard correlated failure: ${error}`);
   setTimeout(next, 400);
 }
 
@@ -116,7 +120,7 @@ function finish(reason) {
   const successes = results.filter((r) => r.ok).length;
   const uniqueResults = new Set(results.map((r) => r.trial));
   const completedExactly = results.length === EXPECTED && uniqueResults.size === EXPECTED && scheduled.size === EXPECTED;
-  const pass = completedExactly && successes >= 15 && !globalTimedOut && malformedResponses === 0;
+  const pass = completedExactly && successes >= 15 && !globalTimedOut && malformedResponses === 0 && hardEvents.length === 0;
   const times = results.filter((r) => r.ok).map((r) => r.ms).sort((a, b) => a - b);
   const report = {
     test: "P009 active 2x8",
@@ -129,6 +133,7 @@ function finish(reason) {
     global_timeout: globalTimedOut,
     malformed_responses: malformedResponses,
     reconnects,
+    hard_events: hardEvents,
     finish_reason: reason,
     p50_ms: times.length ? times[Math.floor(times.length / 2)] : null,
     max_ms: times.length ? times[times.length - 1] : null,
@@ -145,7 +150,7 @@ client.on("connect", () => {
   if (initialConnectSeen) reconnects += 1;
   initialConnectSeen = true;
   if (started) return;
-  client.subscribe(RESP, {qos: 1}, (err) => {
+  client.subscribe([RESP, LOGGING], {qos: 1}, (err) => {
     if (err) return finish(`subscribe error: ${err.message}`);
     if (started) return;
     started = true;
@@ -153,7 +158,19 @@ client.on("connect", () => {
   });
 });
 client.on("message", (topic, message) => {
-  if (topic !== RESP || !waiter || finished) return;
+  if (finished) return;
+  if (topic === LOGGING) {
+    let data;
+    try { data = JSON.parse(message.toString()); }
+    catch (e) { malformedResponses += 1; return finish(`malformed bridge/logging JSON: ${e.message}`); }
+    const msg = String(data.message || "");
+    if (HARD.test(msg)) {
+      hardEvents.push({at: Date.now(), level: data.level ?? null, message: msg.slice(0, 500)});
+      return finish(`hard log signature: ${msg.slice(0, 180)}`);
+    }
+    return;
+  }
+  if (topic !== RESP || !waiter) return;
   let data;
   try {
     data = JSON.parse(message.toString());
@@ -166,14 +183,12 @@ client.on("message", (topic, message) => {
   const current = waiter;
   waiter = null;
   const ok = data.status === "ok";
-  results.push({
-    trial: current.trial,
-    round: current.round,
-    id: current.target.id,
-    ok,
-    ms: Date.now() - current.t0,
-    error: ok ? null : `status=${data.status} ${String(data.error || "").slice(0, 180)}`,
-  });
+  const error = ok ? null : `status=${data.status} ${String(data.error || "").slice(0, 180)}`;
+  results.push({trial: current.trial, round: current.round, id: current.target.id, ok, ms: Date.now() - current.t0, error});
+  if (!ok && HARD.test(String(error))) {
+    hardEvents.push({at: Date.now(), level: "response", message: String(error).slice(0, 500)});
+    return finish(`hard correlated failure: ${error}`);
+  }
   setTimeout(next, 400);
 });
 setTimeout(() => {

@@ -33,7 +33,7 @@ const base=(cfg.mqtt&&cfg.mqtt.base_topic)||"zigbee2mqtt";
 const infoTopic=`${base}/bridge/info`,req=`${base}/bridge/request/health_check`,resp=`${base}/bridge/response/health_check`;
 const c=mqtt.connect(cfg.mqtt.server,{username:cfg.mqtt?.user,password:cfg.mqtt?.password,reconnectPeriod:0});
 let info=null,infoRetain=null,health=null,healthRetain=null,requestMs=null,responseMs=null,done=false;
-function safeInfo(d){const x=d.coordinator||{},m=x.meta||{},n=d.network||{};return {coordinator:{type:x.type??null,ieee_address:x.ieee_address??x.ieeeAddress??null,meta:{revision:m.revision??null,majorrel:m.majorrel??null,minorrel:m.minorrel??null,maintrel:m.maintrel??null,product:m.product??null,transportrev:m.transportrev??null}},network:{pan_id:n.pan_id??n.panId??null,extended_pan_id:n.extended_pan_id??n.extendedPanId??null,channel:n.channel??null},version:d.version??null,zigbee_herdsman:{version:d.zigbee_herdsman?.version??null},permit_join:d.permit_join??null};}
+function safeInfo(d){const x=d.coordinator||{},m=x.meta||{},n=d.network||{};return {coordinator:{type:x.type??null,ieee_address:x.ieee_address??x.ieeeAddress??null,meta:{revision:m.revision??null,major:m.major??null,minor:m.minor??null,patch:m.patch??null,ezsp:m.ezsp??null,majorrel:m.majorrel??null,minorrel:m.minorrel??null,maintrel:m.maintrel??null,product:m.product??null,transportrev:m.transportrev??null}},network:{pan_id:n.pan_id??n.panId??null,extended_pan_id:n.extended_pan_id??n.extendedPanId??null,channel:n.channel??null},version:d.version??null,zigbee_herdsman:{version:d.zigbee_herdsman?.version??null},permit_join:d.permit_join??null};}
 function finish(code,msg){if(done)return;done=true;clearTimeout(timer);if(msg)console.error(msg);if(code===0)console.log(JSON.stringify({captured_ms:Date.now(),health_request_ms:requestMs,health_response_ms:responseMs,info_retain:infoRetain,health_retain:healthRetain,info,health}));c.end(true,{},()=>process.exit(code));}
 function maybe(){if(info&&health&&requestMs!==null&&responseMs>=requestMs&&!healthRetain)finish(0);}
 c.on("error",e=>finish(2,`MQTT error: ${e.message}`));
@@ -72,7 +72,7 @@ function finish(code,obj){if(done)return;done=true;clearTimeout(timer);if(obj)co
 const timer=setTimeout(()=>finish(3,{error:"bridge/info timeout"}),7000);
 c.on("error",e=>finish(2,{error:String(e.message||e).slice(0,160)}));
 c.on("connect",()=>c.subscribe(topic,{qos:0},err=>{if(err)finish(2,{error:String(err.message||err).slice(0,160)});}));
-c.on("message",(t,b)=>{if(t!==topic)return;let d;try{d=JSON.parse(b.toString());}catch(e){return finish(2,{error:`malformed bridge/info: ${e.message}`});}const x=d.coordinator||{},m=x.meta||{};finish(0,{type:x.type??null,ieee_address:x.ieee_address??x.ieeeAddress??null,meta:{revision:m.revision??null,majorrel:m.majorrel??null,minorrel:m.minorrel??null,maintrel:m.maintrel??null,product:m.product??null,transportrev:m.transportrev??null},zigbee2mqtt_version:d.version??null,zigbee_herdsman_version:d.zigbee_herdsman?.version??null});});'''
+c.on("message",(t,b)=>{if(t!==topic)return;let d;try{d=JSON.parse(b.toString());}catch(e){return finish(2,{error:`malformed bridge/info: ${e.message}`});}const x=d.coordinator||{},m=x.meta||{};finish(0,{type:x.type??null,ieee_address:x.ieee_address??x.ieeeAddress??null,meta:{revision:m.revision??null,major:m.major??null,minor:m.minor??null,patch:m.patch??null,ezsp:m.ezsp??null,majorrel:m.majorrel??null,minorrel:m.minorrel??null,maintrel:m.maintrel??null,product:m.product??null,transportrev:m.transportrev??null},zigbee2mqtt_version:d.version??null,zigbee_herdsman_version:d.zigbee_herdsman?.version??null});});'''
     q = shlex.quote
     raw = p009_common.remote_exec(host, f"docker exec {q(container)} node -e {q(js)}").strip()
     try:
@@ -93,7 +93,7 @@ def enrich_snapshot(snap: dict[str, object], host: str, addon: str) -> dict[str,
         sources = evidence.get("identity_sources")
         if isinstance(sources, dict):
             sources["emberznet_version"] = "bridge/info.coordinator.meta from the exact running Z2M owner"
-            sources["ezsp_version"] = "coordinator-backup metadata, with current-start-epoch log fallback"
+            sources["ezsp_version"] = "bridge/info.coordinator.meta when exposed; otherwise exact current-start-epoch log or backup fallback"
     return snap
 
 
@@ -104,25 +104,39 @@ def validate_approved_firmware(snap: dict[str, object], label: str = "snapshot")
     ember_source = "bridge/info"
     ember_tuple: tuple[int, int, int] | None = None
     if isinstance(meta, dict):
-        raw = (meta.get("majorrel"), meta.get("minorrel"), meta.get("maintrel"))
-        if all(isinstance(v, int) and not isinstance(v, bool) for v in raw):
-            ember_tuple = (int(raw[0]), int(raw[1]), int(raw[2]))
+        current = (meta.get("major"), meta.get("minor"), meta.get("patch"))
+        legacy = (meta.get("majorrel"), meta.get("minorrel"), meta.get("maintrel"))
+        if all(isinstance(v, int) and not isinstance(v, bool) for v in current):
+            ember_tuple = tuple(int(v) for v in current)
+        elif all(isinstance(v, int) and not isinstance(v, bool) for v in legacy):
+            ember_tuple = tuple(int(v) for v in legacy)
     if ember_tuple is None:
         ember_source = "current-start-epoch-logs"
-        if re.search(r"(?<!\d)9\.1\.1(?!\d)", logs):
+        if re.search(r"\bEmberZNet\b[^\n]{0,100}\b9\.1\.1(?:\s*\[GA\])?\b", logs, re.IGNORECASE):
             ember_tuple = APPROVED_EMBER
     if ember_tuple != APPROVED_EMBER:
         raise RuntimeError(f"{label}: approved EmberZNet 9.1.1 not proven (source={ember_source}, observed={ember_tuple})")
 
     identity = snap.get("identity") or {}
-    ezsp = identity.get("ezsp_version") if isinstance(identity, dict) else None
-    ezsp_source = "coordinator-backup"
+    ezsp = meta.get("ezsp") if isinstance(meta, dict) else None
+    ezsp_source = "bridge/info"
+    if ezsp is None and isinstance(meta, dict):
+        ezsp = meta.get("transportrev")
+        if ezsp is not None:
+            ezsp_source = "bridge/info-legacy"
+    if ezsp is None and isinstance(identity, dict):
+        ezsp = identity.get("ezsp_version")
+        ezsp_source = "coordinator-backup"
     if isinstance(ezsp, str) and ezsp.isdigit():
         ezsp = int(ezsp)
-    if ezsp != APPROVED_EZSP:
-        ezsp_source = "current-start-epoch-logs"
-        if re.search(r"\bEZSP\b[^\n]*\b19\b|transportrev[^0-9]*19", logs, re.IGNORECASE):
+    if ezsp_source == "coordinator-backup" or ezsp is None:
+        log_match = re.search(r"\bEZSP\b[^\n]{0,100}\b19\b", logs, re.IGNORECASE)
+        if log_match:
             ezsp = APPROVED_EZSP
+            ezsp_source = "current-start-epoch-logs"
+        else:
+            ezsp = None
+            ezsp_source = "current-runtime-unproven"
     if ezsp != APPROVED_EZSP:
         raise RuntimeError(f"{label}: approved EZSP19 not proven (source={ezsp_source}, observed={ezsp!r})")
 

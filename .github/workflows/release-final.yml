@@ -180,7 +180,7 @@ jobs:
             root="$1"; repohash="$2"
             docker run --rm -v "$GITHUB_WORKSPACE/$root:/repo" -w /repo dongle-max-silabs-builder:9.1.1 \
               --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml \
-              --build-dir build --output-dir outputs \
+              --build-dir build --no-clean-build-dir --output-dir outputs \
               --output gbl --output hex --output out \
               --repo-owner analienx --repo-hash "$repohash"
           }

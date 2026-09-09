@@ -138,7 +138,7 @@ The upstream builder is Git-pinned, but its Dockerfile references mutable parent
 
 ## Authoritative release CI
 
-`.github/workflows/build-release.yml` is the release gate. From one exact repository SHA it:
+`.github/workflows/release-final.yml` is the release gate. From one exact repository SHA it:
 
 - runs the entire offline regression suite;
 - builds matched stock rollback;
@@ -222,6 +222,6 @@ The production path does not perform:
 - `tests/` — regression and release-contract tests.
 - `docs/` — architecture, tuning, watchdog/reset and executor runbooks.
 - `release/` — machine-readable bundle semantics/status.
-- `.github/workflows/build-release.yml` — authoritative one-SHA release CI.
+- `.github/workflows/release-final.yml` — authoritative one-SHA release CI.
 
 **Deployment issue #6 remains paused until the current release workflow is green and the resulting exact aggregate artifact has been inspected and pinned.**
