@@ -12,6 +12,12 @@
 #define P011_PROFILE_ID           11u
 #define P011_CAP_IDENTITY         0x0001u
 
+#if defined(__GNUC__)
+#define P011_XNCP_ENTRY __attribute__((used, noinline, externally_visible))
+#else
+#define P011_XNCP_ENTRY
+#endif
+
 static const char p011_source_commit[] = "@@SOURCE_COMMIT@@";
 static const uint8_t p011_resource_hash[16] = { @@RESOURCE_HASH_BYTES@@ };
 
@@ -33,12 +39,12 @@ void emberAfPluginXncpGetXncpInformation(uint16_t *manufacturer_id, uint16_t *ve
 
 /* Simplicity-SDK callback spelling. Keeping both is harmless; only the framework
  * callback referenced by the selected XNCP component is invoked. */
-void sl_zigbee_af_xncp_get_xncp_information(uint16_t *manufacturer_id, uint16_t *version_number)
+P011_XNCP_ENTRY void sl_zigbee_af_xncp_get_xncp_information(uint16_t *manufacturer_id, uint16_t *version_number)
 {
     p011_get_info(manufacturer_id, version_number);
 }
 
-sl_status_t sl_zigbee_af_xncp_incoming_custom_frame_cb(
+P011_XNCP_ENTRY sl_status_t sl_zigbee_af_xncp_incoming_custom_frame_cb(
     uint8_t message_length,
     uint8_t *message_payload,
     uint8_t *reply_payload_length,
