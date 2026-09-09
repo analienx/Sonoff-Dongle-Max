@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ if str(FIRMWARE) not in sys.path:
     sys.path.insert(0, str(FIRMWARE))
 
 from patch_p011_xncp import PROFILE
+import verify_build as core
 
 
 class ProfileVariantTests(unittest.TestCase):
@@ -22,6 +24,23 @@ class ProfileVariantTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(raw).hexdigest(), "1501697486ba4b36ffcd05b7657005fcb6c74ff55f1e23830e5a458758658fca")
         self.assertEqual(PROFILE["resources"]["SL_ZIGBEE_MULTICAST_TABLE_SIZE"], 26)
         self.assertEqual(PROFILE["resources"]["SL_ZIGBEE_BROADCAST_TABLE_SIZE"], 64)
+
+    def test_p011_template_uses_current_sdk_xncp_info_symbol(self):
+        text = (FIRMWARE / "p011_identity_template.c").read_text(encoding="utf-8")
+        self.assertIn("void sl_zigbee_af_xncp_get_xncp_information(", text)
+        self.assertNotIn("sl_zigbee_af_xncp_get_xncp_information_cb", text)
+        verifier = (FIRMWARE / "verify_variants.py").read_text(encoding="utf-8")
+        self.assertIn("sl_zigbee_af_xncp_get_xncp_information", verifier)
+        self.assertNotIn("sl_zigbee_af_xncp_get_xncp_information_cb", verifier)
+
+    def test_readelf_symbols_keeps_defined_duplicate_over_zero_sized_entry(self):
+        raw = (
+            "  1: 00000000     0 FUNC    GLOBAL DEFAULT  UND sl_zigbee_af_xncp_incoming_custom_frame_cb\n"
+            "  2: 08001234    48 FUNC    GLOBAL DEFAULT    1 sl_zigbee_af_xncp_incoming_custom_frame_cb\n"
+        )
+        with mock.patch.object(core, "_readelf", return_value=raw):
+            symbols = core.readelf_symbols(Path("dummy.out"))
+        self.assertEqual(symbols["sl_zigbee_af_xncp_incoming_custom_frame_cb"], 48)
 
     def test_p013_patch_changes_only_multicast_on_p009_text(self):
         with tempfile.TemporaryDirectory() as td:

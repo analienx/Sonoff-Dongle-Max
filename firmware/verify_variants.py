@@ -97,7 +97,7 @@ def main() -> None:
     if sy013.get("sli_zigbee_multicast_table") != 128:
         die("P013 multicast backing array is not 128 B")
     xncp_symbols = (
-        "sl_zigbee_af_xncp_get_xncp_information_cb",
+        "sl_zigbee_af_xncp_get_xncp_information",
         "sl_zigbee_af_xncp_incoming_custom_frame_cb",
     )
     missing = [name for name in xncp_symbols if not isinstance(sy011.get(name), int) or sy011.get(name, 0) <= 0]

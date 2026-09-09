@@ -33,7 +33,7 @@ void emberAfPluginXncpGetXncpInformation(uint16_t *manufacturer_id, uint16_t *ve
 
 /* Simplicity-SDK callback spelling. Keeping both is harmless; only the framework
  * callback referenced by the selected XNCP component is invoked. */
-void sl_zigbee_af_xncp_get_xncp_information_cb(uint16_t *manufacturer_id, uint16_t *version_number)
+void sl_zigbee_af_xncp_get_xncp_information(uint16_t *manufacturer_id, uint16_t *version_number)
 {
     p011_get_info(manufacturer_id, version_number);
 }

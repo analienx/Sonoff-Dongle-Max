@@ -186,7 +186,7 @@ def readelf_symbols(path: Path) -> dict[str, int]:
     for size, name in rx.findall(_readelf(path, "-sW")):
         clean = name.split("@", 1)[0]
         if clean:
-            out[clean] = int(size)
+            out[clean] = max(out.get(clean, 0), int(size))
     return out
 
 
