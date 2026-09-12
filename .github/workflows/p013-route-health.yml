@@ -1,0 +1,44 @@
+name: P013 route-health gate
+
+on:
+  push:
+    branches:
+      - assistant/p013-route-health-20260912
+    paths:
+      - deploy/analyze_route_health.py
+      - tests/test_p013_route_health.py
+      - .github/workflows/p013-route-health.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  route-health:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile analyzer and tests
+        run: python3 -m py_compile deploy/analyze_route_health.py tests/test_p013_route_health.py
+      - name: Run dependency-free regression tests
+        run: |
+          python3 - <<'PY'
+          import runpy
+          ns = runpy.run_path('tests/test_p013_route_health.py')
+          tests = sorted((name, fn) for name, fn in ns.items() if name.startswith('test_') and callable(fn))
+          assert tests, 'no P013 tests discovered'
+          for name, fn in tests:
+              fn()
+              print(f'PASS {name}')
+          print(f'{len(tests)} P013 tests passed')
+          PY
+      - name: Verify CLI hard-failure semantics
+        run: |
+          printf '%s\n' '[2026-09-12 12:00:00] info: ROUTE_ERROR_MANY_TO_ONE_ROUTE_FAILURE for "49550".' | python3 deploy/analyze_route_health.py --fail-hard >/tmp/route.json
+          grep -q '"verdict": "ROUTING_CHURN"' /tmp/route.json
+          set +e
+          printf '%s\n' '[2026-09-12 12:00:01] warning: An ID conflict was detected for network address 25066.' | python3 deploy/analyze_route_health.py --fail-hard >/tmp/hard.json
+          rc=$?
+          set -e
+          test "$rc" -eq 2
+          grep -q '"verdict": "HARD_REGRESSION"' /tmp/hard.json
