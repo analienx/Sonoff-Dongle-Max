@@ -18,6 +18,15 @@ MARKER = "[NCP COUNTERS]"
 TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:T|[ .])\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
 
 # Pinned zigbee-herdsman 10.9.1 EmberCounterType indices.
+TRAFFIC = {
+    0: "MAC_RX_BROADCAST",
+    1: "MAC_TX_BROADCAST",
+    2: "MAC_RX_UNICAST",
+    3: "MAC_TX_UNICAST_SUCCESS",
+    4: "MAC_TX_UNICAST_RETRY",
+    5: "MAC_TX_UNICAST_FAILED",
+}
+
 SELECTED = {
     18: "ASH_OVERFLOW_ERROR",
     19: "ASH_FRAMING_ERROR",
@@ -49,6 +58,15 @@ def decode_line(line: str, *, source: str, line_number: int) -> dict[str, object
 
     ts = TIMESTAMP_RE.search(line.split(MARKER, 1)[0])
     selected = {name: values[index] for index, name in SELECTED.items()}
+    traffic = {name: values[index] for index, name in TRAFFIC.items()}
+    tx_events = (
+        traffic["MAC_TX_BROADCAST"]
+        + traffic["MAC_TX_UNICAST_SUCCESS"]
+        + traffic["MAC_TX_UNICAST_RETRY"]
+        + traffic["MAC_TX_UNICAST_FAILED"]
+        + selected["PHY_CCA_FAIL_COUNT"]
+    )
+    cca_per_1000 = None if tx_events == 0 else round(selected["PHY_CCA_FAIL_COUNT"] * 1000.0 / tx_events, 3)
     return {
         "source": source,
         "line": line_number,
@@ -56,6 +74,8 @@ def decode_line(line: str, *, source: str, line_number: int) -> dict[str, object
         "counter_count": len(values),
         "expected_counter_count": EXPECTED_COUNTER_COUNT,
         "selected": selected,
+        "traffic": traffic,
+        "cca_fail_per_1000_tx_events": cca_per_1000,
         "nonzero_pressure": {k: v for k, v in selected.items() if v != 0},
     }
 
@@ -73,6 +93,8 @@ def summary(records: list[dict[str, object]]) -> dict[str, object]:
     totals = {name: 0 for name in SELECTED.values()}
     maxima = {name: 0 for name in SELECTED.values()}
     nonzero_intervals = {name: 0 for name in SELECTED.values()}
+    traffic_totals = {name: 0 for name in TRAFFIC.values()}
+    traffic_maxima = {name: 0 for name in TRAFFIC.values()}
     for rec in records:
         selected = rec["selected"]
         assert isinstance(selected, dict)
@@ -82,11 +104,27 @@ def summary(records: list[dict[str, object]]) -> dict[str, object]:
             maxima[name] = max(maxima[name], value)
             if value:
                 nonzero_intervals[name] += 1
+        traffic = rec.get("traffic")
+        if isinstance(traffic, dict):
+            for name in traffic_totals:
+                value = int(traffic[name])
+                traffic_totals[name] += value
+                traffic_maxima[name] = max(traffic_maxima[name], value)
+    tx_events = (
+        traffic_totals["MAC_TX_BROADCAST"]
+        + traffic_totals["MAC_TX_UNICAST_SUCCESS"]
+        + traffic_totals["MAC_TX_UNICAST_RETRY"]
+        + traffic_totals["MAC_TX_UNICAST_FAILED"]
+        + totals["PHY_CCA_FAIL_COUNT"]
+    )
     return {
         "intervals": len(records),
         "totals": totals,
         "max_per_interval": maxima,
         "nonzero_intervals": nonzero_intervals,
+        "traffic_totals": traffic_totals,
+        "traffic_max_per_interval": traffic_maxima,
+        "cca_fail_per_1000_tx_events": None if tx_events == 0 else round(totals["PHY_CCA_FAIL_COUNT"] * 1000.0 / tx_events, 3),
     }
 
 

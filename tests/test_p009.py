@@ -387,6 +387,7 @@ class P009Tests(unittest.TestCase):
 
     def test_ncp_counter_decoder_extracts_pressure_signals(self):
         values = [0] * 42
+        values[0:6] = [100, 20, 200, 30, 5, 2]
         values[18] = 1
         values[27] = 2
         values[31] = 3
@@ -401,6 +402,10 @@ class P009Tests(unittest.TestCase):
         self.assertEqual(rec["selected"]["BROADCAST_TABLE_FULL"], 5)
         self.assertEqual(rec["selected"]["NWK_RETRY_OVERFLOW"], 3)
         self.assertEqual(rec["nonzero_pressure"]["ADDRESS_CONFLICT_SENT"], 6)
+        self.assertEqual(rec["traffic"]["MAC_TX_BROADCAST"], 20)
+        self.assertEqual(rec["traffic"]["MAC_TX_UNICAST_RETRY"], 5)
+        self.assertEqual(rec["traffic"]["MAC_TX_UNICAST_FAILED"], 2)
+        self.assertAlmostEqual(rec["cca_fail_per_1000_tx_events"], 4 * 1000 / 61, places=3)
 
     def test_ncp_counter_summary_aggregates_intervals(self):
         records = []

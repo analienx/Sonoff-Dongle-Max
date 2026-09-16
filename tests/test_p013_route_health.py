@@ -56,3 +56,12 @@ def test_soft_timeouts_do_not_masquerade_as_ncp_hard_failure():
     )
     assert report["verdict"] == "CLEAN"
     assert report["soft"] == {"failed_ping": 1, "timeout": 1}
+
+
+def test_stack_config_route_error_threshold_is_not_route_error():
+    report = analyze([
+        '[2026-09-16 20:20:08] Using stack config {"CONCENTRATOR_ROUTE_ERROR_THRESHOLD":1}.',
+        '[2026-09-16 20:21:08] done',
+    ])
+    assert report["route_total"] == 0
+    assert report["routing"]["other_route_error"] == 0
