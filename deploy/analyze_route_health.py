@@ -34,7 +34,7 @@ ROUTE_PATTERNS = {
     "many_to_one": re.compile(r"ROUTE_ERROR_MANY_TO_ONE_ROUTE_FAILURE", re.I),
     "source_route": re.compile(r"ROUTE_ERROR_SOURCE_ROUTE_FAILURE", re.I),
     "non_tree_link": re.compile(r"ROUTE_ERROR_NON_TREE_LINK_FAILURE", re.I),
-    "other_route_error": re.compile(r"ROUTE_ERROR_(?!MANY_TO_ONE_ROUTE_FAILURE|SOURCE_ROUTE_FAILURE|NON_TREE_LINK_FAILURE)[A-Z0-9_]+", re.I),
+    "other_route_error": re.compile(r"ROUTE_ERROR_(?!THRESHOLD\b|MANY_TO_ONE_ROUTE_FAILURE\b|SOURCE_ROUTE_FAILURE\b|NON_TREE_LINK_FAILURE\b)[A-Z0-9_]+", re.I),
 }
 
 SOFT_PATTERNS = {
