@@ -248,3 +248,7 @@ The first XNCP version should remain identity-only; health fields should be adde
 - `.github/workflows/build-p009.yml` — P009 + matched rollback build and evidence bundle.
 
 Current hardening work is performed on `p009-hardening`. Production flashing remains paused until the hardening build is fully green and its new artifact is reviewed.
+
+## Canonical Home Assistant diagnostics and Zigbee device identification
+
+For any live Home Assistant access, Zigbee2MQTT NWK/address mapping or route-error investigation, load the **single canonical** [Home Assistant read-only skill](https://github.com/analienx/config/blob/main/skills/home-assistant-readonly/SKILL.md) from `analienx/config` (main). It provides the existing SSH alias, a host-key-verified Paramiko fallback for Windows OpenSSH exit-255 failures, and the reusable `ha_readonly.py` live inventory helper. Keep implementation and credentials in the canonical location; do not copy the helper or SSH settings here. This does not authorize Zigbee firmware flashing, HA mutations or bypass of this repository's own safety/deployment rules.
