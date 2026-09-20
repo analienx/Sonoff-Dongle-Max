@@ -15,3 +15,7 @@ The current production experiment is **P009**: an EmberZNet 9.1.1 / EZSP 19 NCP 
 - Run only the bounded acceptance gate; no soak or parameter matrix.
 
 See `docs/EXECUTOR-DEPLOY.md` and the active GitHub issue before deploying.
+
+## Canonical Home Assistant diagnostics and Zigbee device identification
+
+For any live Home Assistant access, Zigbee2MQTT NWK/address mapping or route-error investigation, load the **single canonical** [Home Assistant read-only skill](https://github.com/analienx/config/blob/main/skills/home-assistant-readonly/SKILL.md) from `analienx/config` (main). It provides the existing SSH alias, a host-key-verified Paramiko fallback for Windows OpenSSH exit-255 failures, and the reusable `ha_readonly.py` live inventory helper. Keep implementation and credentials in the canonical location; do not copy the helper or SSH settings here. This does not authorize Zigbee firmware flashing, HA mutations or bypass of this repository's own safety/deployment rules.
