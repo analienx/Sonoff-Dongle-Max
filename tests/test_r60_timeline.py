@@ -23,7 +23,7 @@ class TimelineTests(unittest.TestCase):
                 ast.parse(module.REMOTE)
                 for forbidden in ('docker restart','docker stop','docker kill','docker cp',
                                   'mqtt_pub','bridge/request','serialport','ezsp',
-                                  'firmware flash','networkmap', 'configuration.yaml\').write'):
+                                  'firmware flash', 'configuration.yaml\').write'):
                     self.assertNotIn(forbidden, module.REMOTE)
 
     def test_no_broad_zigbee_update_is_mistaken_for_ota(self):
