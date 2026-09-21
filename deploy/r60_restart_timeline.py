@@ -17,7 +17,7 @@ classes={
  'route_non_tree':r'ROUTE_ERROR_NON_TREE_LINK_FAILURE',
  'join_or_interview':r'(?i)(device joined|interview started|starting interview|joining device|permit.join)',
  'leave':r'(?i)(device left|device leave|left the network)',
- 'ota':r'(?i)(ota update|firmware update|update of .*firmware|zigbee.*update|updating firmware)',
+ 'ota_explicit':r'(?i)(\bOTA\b|firmware\s+update|update\s+of\s+.{0,80}firmware|updating\s+firmware)',
  'owner_start':r'(?i)(zigbee.herdsman started|starting zigbee.herdsman|zigbee2mqtt started|starting zigbee2mqtt)',
  'adapter_reset':r'(?i)(adapter disconnected|ncpneedsreset|ncp needs reset|resetting ncp|ash reset)',
  'owner_error':r'(?i)(uncaught exception|unhandled rejection|error while starting|zigbee2mqtt failed)',
