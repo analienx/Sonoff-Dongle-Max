@@ -45,4 +45,16 @@ class EndToEndTests(unittest.TestCase):
   self.assertEqual(rf.route_firsthop(row,12)['firsthop_short'],10)
   row['source_route_entries'][1]['closerIndex']=0
   self.assertEqual(rf.route_firsthop(row,12)['status'],'cached_route_cycle')
+ def test_rejected_B_is_preserved_and_valid_retry_selected(self):
+  import json,tempfile
+  with tempfile.TemporaryDirectory() as directory:
+   original=Path(directory)/'after.json'; retry=Path(directory)/'after_retry1.json'
+   invalid={'valid':False,'phase':'after','reason':'ncp_counter_reset_or_wrap'}
+   original.write_text(json.dumps(invalid),encoding='utf8')
+   def location(stage):return {'after':original,'after_retry1':retry}[stage]
+   with patch.object(ab,'file',side_effect=location):
+    with self.assertRaisesRegex(RuntimeError,'no_valid_after_attempt'):ab.selected_after()
+    retry.write_text(json.dumps({'valid':True,'phase':'after_retry1'}),encoding='utf8')
+    self.assertEqual(ab.selected_after()['phase'],'after_retry1')
+    self.assertEqual(json.loads(original.read_text(encoding='utf8')),invalid)
 if __name__=='__main__':unittest.main()

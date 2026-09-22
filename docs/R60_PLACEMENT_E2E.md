@@ -2,18 +2,21 @@
 
 **Canonical task and acceptance:** [Sonoff issue #27](https://github.com/analienx/Sonoff-Dongle-Max/issues/27); parent [#19](https://github.com/analienx/Sonoff-Dongle-Max/issues/19), epic [#18](https://github.com/analienx/Sonoff-Dongle-Max/issues/18). Reproducible source lives in standard `deploy/`, `runtime/` and `tests/`; sanitized dated A evidence lives in `evidence/issue-27/`. The corresponding sole-owner host safety gate belongs to [config PR #61](https://github.com/analienx/config/pull/61), not a duplicate experiment.
 
-**Issue-specific private results:** `C:\Workspace\.analienx\sonoff-private\issues\27-placement\r60_placement_v2_{before,after,confirm}.json`. The A baseline and its two NCP and one ZCL raw captures were copied there with SHA-256 verification, originals preserved in the shared owner-gate capture spool. The frozen legacy MQTT-only cohort remains at the historical private root solely for identity matching. Raw addresses and NCP snapshots are never committed.
+**Issue-specific private results:** `C:\Workspace\.analienx\sonoff-private\issues\27-placement\r60_placement_v2_{before,after,after_retry1,confirm}.json`. The A baseline and its two NCP and one ZCL raw captures were copied there with SHA-256 verification, originals preserved in the shared owner-gate capture spool. The frozen legacy MQTT-only cohort remains at the historical private root solely for identity matching. Raw addresses and NCP snapshots are never committed.
 
 
-**Status:** Implemented and offline-tested, not a firmware fix. Original `r60_placement_before.json` remains immutable. Its 11/11 outcomes are MQTT state *proxies*, never counted as verified ZCL successes. The issue #27 true-ZCL A baseline has already been captured and preserved; do not rerun `before` on this issue. The next experiment action is `after` only once the dongle is physically relocated.
+**Status:** Implemented and offline-tested, not a firmware fix. Original `r60_placement_before.json` remains immutable. Its 11/11 outcomes are MQTT state *proxies*, never counted as verified ZCL successes. The issue #27 true-ZCL A baseline has already been captured and preserved; do not rerun `before` on this issue. The #27 A/B/B-repeat experiment is complete. The first B attempt was preserved as `valid=false` after a synchronous NCP counter reset; a distinct `after_retry1` capture and `confirm` both completed validly. See `evidence/issue-27/R60_PLACEMENT_AFTER_20260922.md`. Do not rerun any immutable issue #27 stage.
 
 On the authorized Zephyrus laptop, from the existing `C:\Workspace\worktrees\Sonoff-Dongle-Max-r60` tree:
 
 ```powershell
+# HISTORICAL COMMANDS ONLY; #27 stages are complete and immutable. Do NOT rerun them.
 # A complete and immutable: 33/33 verified ZCL reads; do NOT rerun before.
 # Now physically move the WHOLE SONOFF at least 1 m away from Pi, SSD and USB3 cable;
 # keep antenna orientation, channel, TX power and network unchanged.
 py -3 deploy\r60_placement_experiment.py after --relocated --seconds 300
+# After a rejected counter-reset window, preserve it and run one uniquely named retry:
+py -3 deploy\r60_placement_experiment.py after_retry1 --relocated --seconds 300
 py -3 deploy\r60_placement_experiment.py report
 # Optional: leave SONOFF at the moved location, repeat under ordinary traffic.
 py -3 deploy\r60_placement_experiment.py confirm --relocated --seconds 300
@@ -26,4 +29,4 @@ Every temporary `.cjs` diagnostic is SHA256-pinned, installed only via Z2M's cur
 
 The report pairs MAC-failure fraction/rate, retry and CCA rates, neighbor add/remove rate and *distinct* neighbor replacements against exact-device 3-attempt ZCL success/latency. It rejects counter reset, absent targeted log coverage, owner restart, unbalanced (>2x) traffic, or device-command regressions even if NCP counters improved. Cached source-route first-hop grouping is **diagnostic association**, not verified radio path. A short result cannot demonstrate permanent mesh reliability or isolate USB3 noise from changed antenna geometry. Do not run a full network map or turn routers on/off during a window.
 
-Review checks: `py -3 -m unittest discover -s tests -p 'test_r60_*.py'` and `node --test tests/test_r60_verified_read_extension.cjs`. The new v2 results are independent of the preserved legacy placement baseline. `after` and `confirm` require the explicit `--relocated` flag and never move hardware automatically.
+Review checks: `py -3 -m unittest discover -s tests -p 'test_r60_*.py'` and `node --test tests/test_r60_verified_read_extension.cjs`. The new v2 results are independent of the preserved legacy placement baseline. `after`, `after_retry1`, and `confirm` require the explicit `--relocated` flag and never move hardware automatically.

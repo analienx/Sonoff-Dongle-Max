@@ -12,6 +12,14 @@ from r60_rf_window import compare as neighbor_compare,failure_firsthops
 PRIVATE_ROOT=Path(r'C:\Workspace\.analienx\sonoff-private')
 PRIVATE=PRIVATE_ROOT/'issues'/'27-placement'
 def file(stage):return PRIVATE/('r60_placement_v2_'+stage+'.json')
+
+def selected_after():
+    for candidate in ('after_retry1','after'):
+        path=file(candidate)
+        if path.is_file():
+            data=json.loads(path.read_text(encoding='utf8'))
+            if data.get('valid') is True:return data
+    raise RuntimeError('no_valid_after_attempt; rejected attempts preserved')
 def summarize_delta(a,b):
     before,after=a['metrics'],b['metrics']
     keys=('mac_failure_fraction','mac_failure_per_min','neighbor_changes_per_min','cca_failures_per_min','mac_retries_per_min')
@@ -36,9 +44,12 @@ def summarize_delta(a,b):
 def stage(label, seconds, relocated):
     if not PRIVATE.is_dir():raise RuntimeError('issue27_private_evidence_folder_missing')
     if file(label).exists():raise RuntimeError('immutable_phase_already_exists')
-    if label in ('after','confirm') and not relocated:raise RuntimeError('physical_relocation_not_confirmed')
-    if label in ('after','confirm') and not file('before').is_file():raise RuntimeError('verified_before_missing')
-    if label=='confirm' and not file('after').is_file():raise RuntimeError('after_missing')
+    if label in ('after','after_retry1','confirm') and not relocated:raise RuntimeError('physical_relocation_not_confirmed')
+    if label in ('after','after_retry1','confirm') and not file('before').is_file():raise RuntimeError('verified_before_missing')
+    if label=='after_retry1':
+        if not file('after').is_file():raise RuntimeError('rejected_after_missing')
+        if json.loads(file('after').read_text(encoding='utf8')).get('valid') is not False:raise RuntimeError('retry_only_after_invalid_attempt')
+    if label=='confirm':selected_after()
     if label=='before':
         legacy=PRIVATE_ROOT/'r60_placement_before.json'
         if not legacy.is_file():raise RuntimeError('legacy_placement_baseline_missing')
@@ -67,11 +78,11 @@ def stage(label, seconds, relocated):
     if not result['valid']:raise SystemExit(2)
 def report():
     before=json.loads(file('before').read_text(encoding='utf8'))
-    after=json.loads(file('after').read_text(encoding='utf8'))
+    after=selected_after()
     if not before.get('valid') or not after.get('valid'):raise RuntimeError('invalid_before_or_after')
     if before['first']['owner_epoch']!=after['first']['owner_epoch']:
         raise RuntimeError('owner_restarted_between_positions')
-    outcome={'A_to_B':summarize_delta(before,after),'B_repeat':None,
+    outcome={'A_to_B':summarize_delta(before,after),'B_source_phase':after['phase'],'B_repeat':None,
              'note':'ZCL success is per-request owner-local endpoint.read. Cached first hop is indicative, not live RF trace. Placement also changes antenna geometry.'}
     if file('confirm').exists():
         repeat=json.loads(file('confirm').read_text(encoding='utf8'))
@@ -80,7 +91,7 @@ def report():
         outcome['B_repeat']=summarize_delta(after,repeat)
     print(json.dumps(outcome,indent=2,sort_keys=True))
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=('before','after','confirm','report'))
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=('before','after','after_retry1','confirm','report'))
     p.add_argument('--seconds',type=int,default=300);p.add_argument('--relocated',action='store_true')
     a=p.parse_args()
     if a.action=='report':report()
