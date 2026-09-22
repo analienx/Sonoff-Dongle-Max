@@ -85,7 +85,8 @@ if e.stdout.strip()!=expected: raise RuntimeError('owner_epoch_changed')
 r=subprocess.run(['docker','logs','--since',since,'--until',until,cid],capture_output=True,text=True,timeout=15,check=True)
 rows=(r.stdout+'\n'+r.stderr).splitlines()
 markers=sum('[NCP COUNTERS]' in row for row in rows)
-print(json.dumps({'status':'ok','clear_markers':markers,'owner_epoch_unchanged':True}))'''
+print(json.dumps({'status':'ok' if rows else 'no_log_coverage','log_lines':len(rows),
+                  'clear_markers':markers,'owner_epoch_unchanged':True}))'''
 
 def clear_audit(first, second):
     a=datetime.fromisoformat(first['captured_utc'])-timedelta(seconds=10)
