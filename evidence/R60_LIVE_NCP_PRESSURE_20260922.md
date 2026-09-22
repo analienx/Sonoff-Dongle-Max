@@ -1,41 +1,37 @@
-# R60 live NCP readback: neighbor churn and first-hop MAC failures — 2026-09-22
+# R60 live NCP radio-neighbor pressure and USB topology — 2026-09-22
 
-Parent #18, baseline #19, source PR #25. **Sanitized counters only; raw IEEE/NWK, source-route chains, MQTT credentials and original logs remain private on the authorized laptop.** No second serial owner, network-map scan, pairing, network/firmware/TX change, counter clearing, or induced link failure.
+Parent #18 / #19; PR #25. **Redacted read-only evidence, no reliability fix deployed.** Exact IEEE/NWK/route data and unredacted logs stay on authorized laptop. No NCP flash, counter clear, serial takeover, pairing, full map, TX/channel change or router power cycling. Temporary Z2M diagnostic extension file removed; existing owner unchanged.
 
-## Method, timing, and rollback
+## Owner-local methods
 
-Pinned Zigbee2MQTT 2.14.0 / herdsman 10.9.1 existing Ember owner; owner `StartedAt=2026-09-22T06:12:05.582374526Z` stayed unchanged. The reviewed extension uses `adapter.queue.execute()` for **every EZSP read** (correction from the earlier neighbor-only diagnostic, which did not serialize through this queue). One 26-neighbor table read, source-route filled/total, 79 indexed source-route reads, and one **non-clearing** `ezspReadCounters()` read through the owner. Read-only EZSP methods; transient external-extension save/remove through hash-pinned typed helper in `analienx/config` draft PR #61. Latest private result timestamp **2026-09-22T11:22:31.729Z**. Result `ok`, one owner epoch, temp `.cjs` file verified absent after removal; Zigbee2MQTT-managed `external_extensions/node_modules` symlink may remain as before.
+Pinned Z2M 2.14.0 / herdsman 10.9.1, Ember coordinator. One digest-pinned, one-shot external extension through the **existing Z2M owner** at 2026-09-22T11:22:31.729Z (Prague 13:22:31); every NCP call serialized via `adapter.queue.execute()` (corrects earlier raw-EZSP diagnostic). One read of 26 neighbor entries, source-route total/filled, 79 indexed source-route entries and **non-clearing** NCP counter vector. Existing owner StartedAt 2026-09-22T06:12:05.582374526Z remained stable. One-shot helper in `analienx/config` draft PR #61; extension file removed after success; Z2M-managed `external_extensions/node_modules` symlink persists and must not be unlinked ad hoc. Privileged helper's four Python gate tests passed. Newly expanded public diagnostic mocks were committed but not independently verified by a GitHub-hosted test job at the time of this note.
 
-Read/clear epoch independently located from **targeted, filtered current-owner Docker output**: latest `[NCP COUNTERS]` hourly clear on **2026-09-22 13:12:09 Europe/Prague (11:12:09Z)**. That previous counter epoch reported neighbor added **349**, removed **349**, MAC failed unicast **910**. This is the previous clear-to-clear period, not equivalent to 910 end-user commands failing. The non-clearing read at 13:22:31 Prague is about **10 min 23 s after the latest clear**, so the current counters below are **since that clear**, barring asynchronous clear/reset not seen in the targeted recent log. The NCP counters use 16-bit unsigned values; no counter-wrap conclusion is needed for these observed values.
+Read-only, strictly filtered live owner Docker output located `[NCP COUNTERS]` **hourly read-and-clear at 2026-09-22 13:12:09 Prague (11:12:09Z)**. The reported previous interval had **7331 MAC TX unicast successes / 910 failures / 4754 retries**, **349 neighbor additions / 349 removals / 185 stale indications**, **68 route discoveries**, **6544 APS unicast successes / 2 failures**, 552 CCA failures. Packet-buffer allocation failure, PHY→MAC drops, NWK retry overflow, broadcast-table full, and address-conflict-sent counts were **all zero**.
 
-## Current non-clearing counter vector (about 10m23s since hourly clear)
+## New counter interval: 11:12:09Z–11:22:31Z (~10m22s)
 
-| Counter | Value |
+| Metric | NCP non-clearing count |
 |---|---:|
-| `MAC_TX_UNICAST_SUCCESS` | 1332 |
-| `MAC_TX_UNICAST_RETRY` | 866 |
-| **`MAC_TX_UNICAST_FAILED`** | **192** |
-| `APS_DATA_TX_UNICAST_SUCCESS` | 1029 |
-| `APS_DATA_TX_UNICAST_FAILED` | 0 |
-| `ROUTE_DISCOVERY_INITIATED` | 13 |
-| **`NEIGHBOR_ADDED` / `NEIGHBOR_REMOVED`** | **61 / 61** |
-| `NEIGHBOR_STALE` | 35 |
-| `PHY_CCA_FAIL_COUNT` | 99 |
-| `BROADCAST_TABLE_FULL` | 0 |
-| `ALLOCATE_PACKET_BUFFER_FAILURE` | 0 |
-| `PHY_TO_MAC_QUEUE_LIMIT_REACHED` | 0 |
-| `TYPE_NWK_RETRY_OVERFLOW` | 0 |
-| `ASH_OVERFLOW_ERROR` / `ASH_FRAMING_ERROR` / `ASH_OVERRUN_ERROR` | 0 / 0 / 0 |
-| `ADDRESS_CONFLICT_SENT` | 0 |
+| MAC TX unicast success / failure / retry | **1332 / 192 / 866** |
+| APS TX unicast success / failure | 1029 / 0 |
+| Neighbor added / removed / stale | **61 / 61 / 35** |
+| NWK route discoveries initiated | 13 |
+| PHY CCA failure | 99 |
+| Broadcast table full / packet buffer allocation failure | 0 / 0 |
+| PHY→MAC drops / NWK retry overflow | 0 / 0 |
+| ASH overflow / framing / overrun | 0 / 0 / 0 |
+| Address-conflict sent | 0 |
 
-This is **active neighbor turnover** at a persistently occupied table, not a frozen admission/eviction algorithm. Distinguish neighbor turnover from true RF loss: `NEIGHBOR_STALE=35` is not a per-removal reason code. The nonzero `ROUTE_DISCOVERY_INITIATED=13` means some NWK route discoveries *were accepted for submission to the MAC* during this epoch; it does **not** enumerate individual on-air MTORR advertisements or prove that distant routers received them. The `MAC_TX_UNICAST_FAILED` event counts **link-layer transmissions**, not 192 ZCL failed commands: APS unicast failure counter is 0 in this same short epoch. No evidence here for NCP broadcast-table/packet-pool/ASH exhaustion. Older retained logs contain genuine failed `set` operations in other epochs.
+MAC failed/(MAC success+failed) is ~11.0% in the prior hourly period and ~12.6% in the short next period. **These are individual link-layer frame outcomes, not user command failure rates; MAC retry counts have different semantics.** NCP `ROUTE_DISCOVERY_INITIATED` counts submission of *some* route discoveries to the MAC, **not specifically confirmed transmitted/propagated MTORR**. APS unicast failures only 2 and 0 in these particular counter periods; older saved Z2M logs contain real failed `set` operations. No basis here for adding another MTORR timer or increasing BTT/source-route storage.
 
-## NCP table state
+## Table structure and turnover
 
-Neighbor table **26/26**; the previous outgoing-cost-0 neighbor was **not** present in this read (`0` neighbors with outbound cost 0). Source-route table **79/254**; all 79 indexed source-route entries have distinct destination short addresses. The NCP `closerIndex` chains have 30 direct, 34 one-relay, and 15 two-relay chains; all terminate with the expected `255` sentinel, none contain invalid indices or cycles. This establishes only structural consistency, **not** that every stored radio path works over the air or that a stale NWK/IEEE mapping is absent.
+Neighbor table full 26/26, but two entries replaced over a previous 13m21s matched pair, proving admission is not frozen. A previous neighbor with outgoing cost 0 recovered/was replaced; the latest snapshot has **zero** cost-0 neighbors. Source-route table **79/254**, all 79 indexed entries distinct and structurally valid: 30 direct, 34 one-relay, 15 two-relay chains; no invalid closer indices/cycles. This does **not** certify current on-air delivery or IEEE↔NWK correctness. The repeated added/removed counters expose **sustained high neighbor churn**, plausibly from a full 26-entry table and/or unstable 2.4 GHz links, **not** proof that a larger or more aggressive neighbor table is buildable or will cure it.
 
-## Engineering decision
+## Host/RF topology: actionable additional evidence
 
-**Leading actionable fault class: sustained high-rate neighbor replacement plus first-hop MAC delivery loss on a dense direct-router population.** This is a more defensible first target than another MTORR timer, route-table 254 increase, forcing out one weak neighbor, indiscriminate TX change, or disabling source-route storage. A full 26-entry table with active replacement and 61 add/remove events in ~10 minutes is evidence for **capacity/selection pressure**, not proof that a hypothetical 60-neighbor firmware change can be built safely or will eliminate it. More radios or another link may be involved; Wi-Fi AP state, antenna/placement and radio interference remain unverified.
+Live Z2M serial configuration uses a **local USB device path, not Ethernet/Wi-Fi transport**. HA OS USB inventory reports `Bus 001 Device 002: 10c4:ea60 SONOFF SONOFF Dongle Max MG24` (USB2 host bus) and a separate `Bus 002 Device 002: 152d:0580 JMicron AXAGON External Enclosure` (USB3 host bus); `lsblk` shows `sda usb disk`. **Both the Zigbee coordinator and a USB3 external SSD are attached to the Raspberry Pi.** Software inventory does *not* report their physical distance, cable shielding/placement, antenna attachment or active 2.4GHz SONOFF AP. Laptop WLAN scan did not show an obvious SONOFF SSID; HA entity registry shows no readily usable SONOFF AP/WLAN control entity. Do **not** claim ESP Wi-Fi interferes or is enabled based on these scans.
 
-**One next intervention:** use one reversible, controlled physical/RF change at the coordinator (verify current SONOFF AP/WLAN mode on the wired device, disable an active 2.4GHz AP through its supported authenticated console if enabled, or relocate/separate its Zigbee antenna from colocated emitters without changing PAN/channel/IEEE), then compare short matched **MAC failure + neighbor turnover + actual ZCL command delivery** counters, not raw route errors alone. If RF separation cannot reduce turnover substantially, pursue vendor- or stack-supported neighbor selection/capacity remediation; do not claim that editing a constant or adding MTORR broadcasts is a fix. Preserve original configured TX 8 dBm at the capture; do not change it as part of the first intervention. Restore the original AP/placement if the short comparison worsens. This diagnostic did NOT deploy a reliability change.
+Zigbee2MQTT's official network-stability guidance explicitly warns against placing a USB coordinator close to a computer, SSD or other radio source and recommends at least 50 cm of USB extension cable: https://www.zigbee2mqtt.io/advanced/zigbee/02_improve_network_range_and_stability.html . With the unusually high verified MAC TX failures and neighbor replacement counts, **separating the SONOFF radio and its antennas from the Pi and the USB3 SSD/cable** is a reversible, low-risk next physical intervention if they are currently colocated. Prefer a suitably shielded USB2 extension and place the radio/antennas ≥1 m from the Pi/SSD/USB3 cabling and other 2.4GHz radios; do not unplug the boot SSD. This may briefly interrupt Z2M USB serial and is **not** remotely executable; the user must make the physical placement change. Do not move it if already separated at a sufficient distance; then focus on other RF/environmental differences or coordinator firmware selection/capacity.
+
+**Acceptance after physical change:** keep channel, radio TX, firmware and normal household traffic unchanged; use a bounded one-owner 10-minute post-settle read (NCP counter epoch/short delta and 2–3 previously affected, powered devices' read-only ZCL outcomes), compare normalized MAC failures and neighbor add/remove per minute with 11.0–12.6% and ~5.6–5.9 replacements/min baseline. A major and repeatable reduction alongside restored actual commands supports RF-coupling cause; no improvement rejects it and motivates on-device neighbor-selection/capacity engineering. No threshold is a promise of flawless behavior. No autonomous repeated log collection or speculative flashing.
