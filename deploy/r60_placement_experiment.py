@@ -9,7 +9,8 @@ from pathlib import Path
 from r60_placement_ab import snapshot,window,clear_audit,intentionally_unpowered
 from r60_verified_reads import run as verified,approved as approved_cohort
 from r60_rf_window import compare as neighbor_compare,failure_firsthops
-PRIVATE=Path(r'C:\Workspace\.analienx\sonoff-private')
+PRIVATE_ROOT=Path(r'C:\Workspace\.analienx\sonoff-private')
+PRIVATE=PRIVATE_ROOT/'issues'/'27-placement'
 def file(stage):return PRIVATE/('r60_placement_v2_'+stage+'.json')
 def summarize_delta(a,b):
     before,after=a['metrics'],b['metrics']
@@ -33,12 +34,13 @@ def summarize_delta(a,b):
             'before_neighbor_changes_per_min':before['neighbor_changes_per_min'],
             'after_neighbor_changes_per_min':after['neighbor_changes_per_min']}
 def stage(label, seconds, relocated):
+    if not PRIVATE.is_dir():raise RuntimeError('issue27_private_evidence_folder_missing')
     if file(label).exists():raise RuntimeError('immutable_phase_already_exists')
     if label in ('after','confirm') and not relocated:raise RuntimeError('physical_relocation_not_confirmed')
     if label in ('after','confirm') and not file('before').is_file():raise RuntimeError('verified_before_missing')
     if label=='confirm' and not file('after').is_file():raise RuntimeError('after_missing')
     if label=='before':
-        legacy=PRIVATE/'r60_placement_before.json'
+        legacy=PRIVATE_ROOT/'r60_placement_before.json'
         if not legacy.is_file():raise RuntimeError('legacy_placement_baseline_missing')
         previous=json.loads(legacy.read_text(encoding='utf8'))
         known={n for n in previous['multizone_probe']['names'] if not intentionally_unpowered(n)}

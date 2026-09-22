@@ -1,4 +1,9 @@
-﻿# R60 end-to-end placement experiment (v2)
+# R60 end-to-end placement experiment (v2)
+
+**Canonical task and acceptance:** [Sonoff issue #27](https://github.com/analienx/Sonoff-Dongle-Max/issues/27); parent [#19](https://github.com/analienx/Sonoff-Dongle-Max/issues/19), epic [#18](https://github.com/analienx/Sonoff-Dongle-Max/issues/18). Reproducible source lives in standard `deploy/`, `runtime/` and `tests/`; sanitized dated A evidence lives in `evidence/issue-27/`. The corresponding sole-owner host safety gate belongs to [config PR #61](https://github.com/analienx/config/pull/61), not a duplicate experiment.
+
+**Issue-specific private results:** `C:\Workspace\.analienx\sonoff-private\issues\27-placement\r60_placement_v2_{before,after,confirm}.json`. The A baseline and its two NCP and one ZCL raw captures were copied there with SHA-256 verification, originals preserved in the shared owner-gate capture spool. The frozen legacy MQTT-only cohort remains at the historical private root solely for identity matching. Raw addresses and NCP snapshots are never committed.
+
 
 **Status:** Implemented and offline-tested, not a firmware fix. Original `r60_placement_before.json` remains immutable. Its 11/11 outcomes are MQTT state *proxies*, never counted as verified ZCL successes. The v2 test obtains a new true-ZCL baseline before moving the SONOFF.
 
