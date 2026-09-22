@@ -38,7 +38,9 @@ client.on('message',(topic,buffer,packet)=>{
  if(topic===base+'/bridge/devices'){
   try{const parsed=JSON.parse(buffer.toString());if(Array.isArray(parsed))inventory=parsed;}catch{}return;}
  if(topic===base+'/bridge/state'){
-  const state=buffer.toString();if(state!=='online'&&state!=='true')done('bridge_not_online');return;}
+  const raw=buffer.toString();let online=(raw==='online'||raw==='true');
+  if(!online){try{const parsed=JSON.parse(raw);online=(parsed==='online'||parsed===true||parsed?.state==='online');}catch{}}
+  if(!online)done('bridge_not_online');return;}
  if(chosen && topic===base+'/'+chosen.friendly_name && !packet.retain && requestSent){
   try{const state=JSON.parse(buffer.toString());if(Object.prototype.hasOwnProperty.call(state,key)){answered=true;done('fresh_reply_after_route_error');}}catch{}return;}
  if(topic!==base+'/bridge/logging'||chosen||!inventory)return;
