@@ -5,12 +5,12 @@
 **Issue-specific private results:** `C:\Workspace\.analienx\sonoff-private\issues\27-placement\r60_placement_v2_{before,after,confirm}.json`. The A baseline and its two NCP and one ZCL raw captures were copied there with SHA-256 verification, originals preserved in the shared owner-gate capture spool. The frozen legacy MQTT-only cohort remains at the historical private root solely for identity matching. Raw addresses and NCP snapshots are never committed.
 
 
-**Status:** Implemented and offline-tested, not a firmware fix. Original `r60_placement_before.json` remains immutable. Its 11/11 outcomes are MQTT state *proxies*, never counted as verified ZCL successes. The v2 test obtains a new true-ZCL baseline before moving the SONOFF.
+**Status:** Implemented and offline-tested, not a firmware fix. Original `r60_placement_before.json` remains immutable. Its 11/11 outcomes are MQTT state *proxies*, never counted as verified ZCL successes. The issue #27 true-ZCL A baseline has already been captured and preserved; do not rerun `before` on this issue. The next experiment action is `after` only once the dongle is physically relocated.
 
 On the authorized Zephyrus laptop, from the existing `C:\Workspace\worktrees\Sonoff-Dongle-Max-r60` tree:
 
 ```powershell
-py -3 deploy\r60_placement_experiment.py before --seconds 300
+# A complete and immutable: 33/33 verified ZCL reads; do NOT rerun before.
 # Now physically move the WHOLE SONOFF at least 1 m away from Pi, SSD and USB3 cable;
 # keep antenna orientation, channel, TX power and network unchanged.
 py -3 deploy\r60_placement_experiment.py after --relocated --seconds 300
