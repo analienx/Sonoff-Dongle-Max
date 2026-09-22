@@ -1,0 +1,7 @@
+# R60 2026-09-22 — one-pass evidence decision
+
+Evidence: [`evidence/R60_ONE_PASS_20260922.md`](../evidence/R60_ONE_PASS_20260922.md). One successful read-only HA session collected the retained Z2M logs (18 files), database, state, selected settings and owner metadata. **No second HA collection pass is authorized or needed for offline analysis of this capture.** Raw private archive stays on authorized laptop; public repository contains only source and sanitized summary. The stock-owner neighbor extension remains staged, undeployed.
+
+Decision: prioritize eliminating unplanned/overlapping Zigbee2MQTT owner restarts and other simultaneous Zigbee operations. Logs show repeated graceful stops and new sessions, not a proven NCP panic. Source of those stops is undetermined; inspect existing authorized local orchestration/config source rather than re-polling production HA or restarting it for diagnostics. Distinguish intentional relay-unpowered bulb pings from actual service failures. Do not equate 567 route-error *lines* with command losses, or the 26 configured direct neighbors with proof that an MG24 stack rewrite is necessary.
+
+Next executable implementation is a **narrow supervisor/owner stability guard based on existing configuration sources**, with safe review/rollback and no second UART owner, device re-pairing or firmware/network changes. After stability work, use the retained archive to choose one reproducible device-command/path regression to fix. Park wide #20 source audit; do not require another log collection merely to continue implementation.
