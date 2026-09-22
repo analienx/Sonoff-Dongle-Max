@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot offline concentrator triage. Reads ONLY the previously saved private HA archive.
+"""One-shot offline concentrator triage; reads ONLY an existing private HA archive.
 
 Usage: py -3 deploy/r60_concentrator_decision.py C:\\...\\r60_ha_one_pass_20260922T070247Z.tar.gz
 No HA/network calls, writes, IEEE addresses, passwords or raw lines in output.
@@ -24,8 +24,10 @@ def inspect(lines):
         result['lines'] += 1
         stamp = STAMP.match(line)
         if stamp:
-            result['first'] = result['first'] or stamp.group(1)
-            result['last'] = stamp.group(1)
+            timestamp = stamp.group(1)
+            # Files are rotated; archive-member iteration is NOT chronological.
+            result['first'] = min(result['first'], timestamp) if result['first'] else timestamp
+            result['last'] = max(result['last'], timestamp) if result['last'] else timestamp
         route = ROUTE.search(line)
         if route:
             result['route_errors'][route.group(1)] += 1
