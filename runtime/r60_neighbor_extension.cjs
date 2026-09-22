@@ -50,19 +50,21 @@ module.exports = class R60NeighborExtension {
       }
       if (!this.stopped) await this.mqtt.publish(RESPONSE, JSON.stringify({transaction, status: 'ok', data: response}));
     } catch (err) {
-      const allowed = ['bad_request', 'probe_busy', 'cooldown', 'unsupported_owner', 'owner_queue_busy', 'neighbor_count_out_of_range', 'probe_budget_exceeded', 'neighbor_entry_error'];
+      const allowed = ['bad_request', 'probe_busy', 'cooldown', 'unsupported_owner', 'owner_queue_busy', 'neighbor_count_out_of_range', 'probe_budget_exceeded', 'neighbor_entry_error', 'invalid_source_route_capacity'];
       const error = allowed.includes(err.message) ? err.message : 'probe_failed';
       if (!this.stopped) await this.mqtt.publish(RESPONSE, JSON.stringify({transaction, status: 'error', error}));
     }
   }
 
   async snapshot() {
-    // Private properties here are verified only against the EXACT pinned owner versions.
-    // They are accessed on the already-running owner; never create another Ezsp or serial connection.
+    // Use only already-running NCP owner, no second EZSP, network map, or counter clears.
     const adapter = this.zigbee?.zhController?.adapter;
     const ezsp = adapter?.ezsp;
     if (!adapter || !ezsp || typeof ezsp.ezspNeighborCount !== 'function' ||
-        typeof ezsp.ezspGetNeighbor !== 'function' || typeof adapter.queue?.count !== 'function') throw Error('unsupported_owner');
+        typeof ezsp.ezspGetNeighbor !== 'function' ||
+        typeof ezsp.ezspGetSourceRouteTableTotalSize !== 'function' ||
+        typeof ezsp.ezspGetSourceRouteTableFilledSize !== 'function' ||
+        typeof adapter.queue?.count !== 'function') throw Error('unsupported_owner');
     if (adapter.queue.count() > 8) throw Error('owner_queue_busy');
     const started = Date.now();
     const count = await ezsp.ezspNeighborCount();
@@ -76,7 +78,15 @@ module.exports = class R60NeighborExtension {
       const {shortId, longId, averageLqi, inCost, outCost, age} = row;
       entries.push({index, shortId, longId, averageLqi, inCost, outCost, age});
     }
+    if (this.stopped || Date.now() - started >= BUDGET_MS) throw Error('probe_budget_exceeded');
+    if (adapter.queue.count() > 8) throw Error('owner_queue_busy');
+    const sourceRouteCapacity = await ezsp.ezspGetSourceRouteTableTotalSize();
+    const sourceRouteFilled = await ezsp.ezspGetSourceRouteTableFilledSize();
+    if (!Number.isInteger(sourceRouteCapacity) || sourceRouteCapacity < 1 || sourceRouteCapacity > 254 ||
+        !Number.isInteger(sourceRouteFilled) || sourceRouteFilled < 0 ||
+        sourceRouteFilled > sourceRouteCapacity) throw Error('invalid_source_route_capacity');
     return {captured_utc: new Date().toISOString(), count, max_supported: MAX_NEIGHBORS,
+      source_route_filled: sourceRouteFilled, source_route_capacity: sourceRouteCapacity,
       elapsed_ms: Date.now() - started, entries};
   }
 };
