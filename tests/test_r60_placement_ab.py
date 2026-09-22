@@ -1,6 +1,12 @@
 """Offline invariants for the placement A/B analyzer. No HA connection."""
 import importlib.util
 import unittest
+import tempfile
+import json
+import io
+import ast
+from contextlib import redirect_stdout
+from unittest.mock import patch
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,5 +55,52 @@ class WindowTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'invalid_window'):mod.window(a,b)
         b=make(self.now+timedelta(seconds=180),mac_success=1001,mac_failed=100)
         with self.assertRaisesRegex(ValueError,'too_few'):mod.window(a,b)
+
+
+    def test_targeted_counter_clear_remote_script_parses(self):
+        ast.parse(mod.CLEAR_SCAN)
+        self.assertIn('docker',''.join(mod.CLEAR_SCAN.splitlines()))
+        self.assertIn('[NCP COUNTERS]',mod.CLEAR_SCAN)
+
+    def test_report_paired_legacy_cohort_and_response_regression(self):
+        names=['HallBulb1','KitchenSocketOven','LivingRoomSocketWifiRight',
+               'WorkroomSwitchLedsTable','BathroomSwitchRouter','HallBulb2',
+               'KitchenSocketFridge','LivingRoomSocketHA']
+        off='WorkroomTableRightDimmer'
+        def metrics(fraction,changes):
+            return {k:v for k,v in {'mac_frames':419,'mac_failure_fraction':fraction,
+              'mac_failure_per_min':6.0,'neighbor_changes_per_min':changes,
+              'cca_failures_per_min':6.0,'mac_retries_per_min':40.0}.items()}
+        def result(name,ok=True):
+            return {'name':name,'status':'fresh_state' if ok else 'no_verified_response',
+                    'latency_ms':100 if ok else None}
+        base={'valid':True,'metrics':metrics(.05,10),
+              'multizone_probe':{'names':names+[off],'zone_count':5,
+                 'owner_epoch':'same','same_owner_epoch':True,
+                 'results':[result(n) for n in names]+[result(off,False)]}}
+        post={'valid':True,'metrics':metrics(.005,1),
+              'clear_audit':{'status':'ok','clear_markers':0},
+              'baseline_counter_clear_audit':{'status':'ok','clear_markers':0},
+              'multizone_probe':{'names':names,'zone_count':5,
+                 'owner_epoch':'same','same_owner_epoch':True,
+                 'results':[result(n,n!=names[0]) for n in names]}}
+        with tempfile.TemporaryDirectory() as t,patch.object(mod,'PRIVATE',Path(t)):
+            (Path(t)/'r60_placement_before.json').write_text(json.dumps(base))
+            (Path(t)/'r60_placement_after.json').write_text(json.dumps(post))
+            output=io.StringIO()
+            with redirect_stdout(output): mod.report()
+            report=json.loads(output.getvalue())
+            self.assertIn('inconclusive',report['verdict'])
+            self.assertEqual(len(report['paired_devices']),8)
+            self.assertEqual(report['excluded_by_design'],[off])
+            self.assertEqual(report['after_devices']['fresh_state_proxies'],7)
+            self.assertEqual(report['paired_devices'][0]['after'],'no_verified_response')
+            del post['baseline_counter_clear_audit']
+            (Path(t)/'r60_placement_after.json').write_text(json.dumps(post))
+            output=io.StringIO()
+            with redirect_stdout(output): mod.report()
+            report=json.loads(output.getvalue())
+            self.assertIn('inconclusive',report['verdict'])
+
 
 if __name__=='__main__': unittest.main()

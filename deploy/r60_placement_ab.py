@@ -5,12 +5,14 @@ No second serial owner, database edit, log sweep, reset, or automatic firmware c
 """
 from __future__ import annotations
 import argparse
+import importlib.util
 import json
+import shlex
 from pathlib import Path
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 PRIVATE = Path(r'C:\Workspace\.analienx\sonoff-private')
 GATE = Path(r'C:\Workspace\worktrees\config-r60-owner-gate\supervisor\safety\r60_z2m_neighbor_gate.py')
@@ -69,6 +71,42 @@ def window(a, b):
                 'PHY_TO_MAC_QUEUE_LIMIT_REACHED','TYPE_NWK_RETRY_OVERFLOW','ASH_OVERFLOW_ERROR','ASH_FRAMING_ERROR','ASH_OVERRUN_ERROR')),
             'counter_deltas':counts}
 
+
+# Narrow container-local log inspection: return marker counts only, never a general log archive.
+# Negative NCP deltas alone cannot detect hourly clear + rapid counter re-accumulation.
+CLEAR_SCAN = r'''import json,subprocess,sys
+expected,since,until=sys.argv[1:4]
+p=subprocess.run(['docker','ps','--filter','name=zigbee2mqtt','--format','{{.ID}}'],capture_output=True,text=True,timeout=5,check=True)
+ids=[x.strip() for x in p.stdout.splitlines() if x.strip()]
+if len(ids)!=1: raise RuntimeError('owner_count_changed')
+cid=ids[0]
+e=subprocess.run(['docker','inspect','-f','{{.State.StartedAt}}',cid],capture_output=True,text=True,timeout=5,check=True)
+if e.stdout.strip()!=expected: raise RuntimeError('owner_epoch_changed')
+r=subprocess.run(['docker','logs','--since',since,'--until',until,cid],capture_output=True,text=True,timeout=15,check=True)
+rows=(r.stdout+'\n'+r.stderr).splitlines()
+markers=sum('[NCP COUNTERS]' in row for row in rows)
+print(json.dumps({'status':'ok','clear_markers':markers,'owner_epoch_unchanged':True}))'''
+
+def clear_audit(first, second):
+    a=datetime.fromisoformat(first['captured_utc'])-timedelta(seconds=10)
+    b=datetime.fromisoformat(second['captured_utc'])+timedelta(seconds=10)
+    command='python3 -c '+shlex.quote(CLEAR_SCAN)+' '+' '.join(shlex.quote(x) for x in (
+        first['owner_epoch'],a.isoformat(),b.isoformat()))
+    spec=importlib.util.spec_from_file_location('ha_readonly_counter_audit',
+        Path(r'C:\Workspace\repos\config\skills\home-assistant-readonly\ha_readonly.py'))
+    if spec is None or spec.loader is None: raise RuntimeError('canonical_ssh_helper_missing')
+    mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+    ssh=mod.connect('ha')
+    try:
+        _,out,err=ssh.exec_command(command,timeout=29)
+        data=out.read().decode('utf8','replace').strip()
+        if out.channel.recv_exit_status(): raise RuntimeError('counter_clear_audit_failed')
+        result=json.loads(data.splitlines()[-1])
+        if result.get('status')!='ok' or result.get('owner_epoch_unchanged') is not True:
+            raise RuntimeError('counter_clear_audit_incomplete')
+        return result
+    finally: ssh.close()
+
 def stage(phase, seconds):
     PRIVATE.mkdir(parents=True, exist_ok=True)
     path=PRIVATE/f'r60_placement_{phase}.json'
@@ -86,6 +124,12 @@ def stage(phase, seconds):
         frozen=[n for n in previous['multizone_probe']['names'] if not intentionally_unpowered(n)]
         if len(frozen)<8:
             raise RuntimeError('insufficient_confirmed_powered_baseline_targets')
+    # The old baseline predates counter-clear auditing. Verify it without overwriting original evidence.
+    prior_audit=None
+    if phase=='after':
+        try: prior_audit=clear_audit(previous['first'],previous['second'])
+        except (ValueError,RuntimeError,TimeoutError) as exc:
+            prior_audit={'status':'unverified','reason':type(exc).__name__}
     probe=multizone_read(frozen)
     if probe['status']!='complete' or probe['same_owner_epoch'] is not True:
         raise RuntimeError('multizone_sample_failed')
@@ -95,11 +139,18 @@ def stage(phase, seconds):
     second=snapshot()
     result={'phase':phase,'setup':'unchanged original placement' if phase=='before' else 'dongle relocated; unchanged firmware/channel/TX',
             'started_utc':first['captured_utc'],'finished_utc':second['captured_utc'],
-            'first':first,'second':second,'multizone_probe':probe}
-    try: result['metrics']=window(first,second);result['valid']=True
-    except ValueError as exc: result['valid']=False;result['reason']=str(exc)
+            'first':first,'second':second,'multizone_probe':probe,
+            'baseline_counter_clear_audit':prior_audit}
+    try:
+        result['metrics']=window(first,second)
+        result['clear_audit']=clear_audit(first,second)
+        if result['clear_audit']['clear_markers']!=0:
+            raise ValueError('hourly_counter_clear_observed; discard_window')
+        result['valid']=True
+    except (ValueError,RuntimeError,TimeoutError) as exc:
+        result['valid']=False;result['reason']=str(exc)
     with path.open('x',encoding='utf8') as out: json.dump(result,out,indent=2,sort_keys=True)
-    print(json.dumps({'phase':phase,'valid':result['valid'],'metrics':result.get('metrics'),
+    print(json.dumps({'phase':phase,'valid':result['valid'],'metrics':result.get('metrics'),'clear_audit':result.get('clear_audit'),
                       'multizone_sample':{'count':len(probe['names']),'zones':probe['zone_count'],'responses':sum(x['status']=='fresh_state' for x in probe['results'])},'private_path':str(path),'reason':result.get('reason')},sort_keys=True))
     if not result['valid']: raise SystemExit(2)
 
@@ -119,14 +170,20 @@ def report():
           changes['mac_failure_fraction'] >= 25 and changes['neighbor_changes_per_min'] >= 25):
         verdict='both indicators worse; restore prior placement if devices are affected'
     else: verdict='mixed/insufficient evidence; do not attribute cause from this short comparison'
+    before_audit=before.get('clear_audit') or after.get('baseline_counter_clear_audit')
+    after_audit=after.get('clear_audit')
+    if not all(isinstance(v,dict) and v.get('status')=='ok' for v in (before_audit,after_audit)):
+        verdict='provisional: counter-clear provenance not verified for both windows'
+    elif before_audit['clear_markers'] or after_audit['clear_markers']:
+        verdict='inconclusive: hourly counter-clear marker within comparison window'
     pa,pb=before['multizone_probe'],after['multizone_probe']
     eligible=[n for n in pa.get('names',[]) if not intentionally_unpowered(n)]
-    if eligible!=pb.get('names') or pa.get('zone_count',0)<4:
+    if eligible!=pb.get('names') or len(eligible)<8 or len(set(eligible))!=len(eligible) or pa.get('zone_count',0)<4 or pb.get('zone_count',0)<4:
         raise RuntimeError('device_cohort_changed_between_placements')
     def outcome(p):
         outcomes=[x for x in p['results'] if x['name'] in eligible];success=[x for x in outcomes if x['status']=='fresh_state']
         timings=sorted(x['latency_ms'] for x in success)
-        return {'attempted':len(outcomes),'verified_fresh':len(success),
+        return {'attempted':len(outcomes),'fresh_state_proxies':len(success),
                 'success_fraction':round(len(success)/len(outcomes),3),
                 'p50_latency_ms':timings[len(timings)//2] if timings else None,
                 'failures':[x['name'] for x in outcomes if x['status']!='fresh_state']}
@@ -135,15 +192,15 @@ def report():
         verdict='inconclusive: owner changed between placement stages'
     if pa.get('same_owner_epoch') is not True or pb.get('same_owner_epoch') is not True:
         verdict='inconclusive: Zigbee2MQTT restarted during multi-zone sample'
-    if after_out['verified_fresh']<before_out['verified_fresh']:
-        verdict+='; multi-zone device success regressed'
-    if before_out['verified_fresh']<8 or after_out['verified_fresh']<8:
+    if after_out['fresh_state_proxies']<before_out['fresh_state_proxies']:
+        verdict='inconclusive: device response proxy regressed after relocation'
+    if before_out['fresh_state_proxies']<8 or after_out['fresh_state_proxies']<8:
         verdict+='; insufficient verified multi-zone responses for a reliability claim'
     print(json.dumps({'verdict':verdict,'relative_changes_pct':changes,'traffic_ratio_after_before':round(load,3),
         'before':{k:a[k] for k in metrics},'after':{k:b[k] for k in metrics},
-        'before_devices':before_out,'after_devices':after_out,'fixed_sample_names':eligible,
+        'before_devices':before_out,'after_devices':after_out,'paired_devices':[{'name':n,'before':next(x['status'] for x in pa['results'] if x['name']==n),'after':next(x['status'] for x in pb['results'] if x['name']==n),'before_latency_ms':next(x['latency_ms'] for x in pa['results'] if x['name']==n),'after_latency_ms':next(x['latency_ms'] for x in pb['results'] if x['name']==n)} for n in eligible], 'fixed_sample_names':eligible,
         'excluded_by_design':[n for n in pa['names'] if intentionally_unpowered(n)],
-        'note':'Fresh non-retained states are device-response proxies, not proof of correlated ZCL read; room diversity does not prove distinct router paths. MAC outcomes are radio frames, not household commands. Placement A/B does not isolate USB3 noise from antenna geometry.'},indent=2))
+        'note':'Fresh non-retained states are device-response proxies, not proof of correlated ZCL read; one read per router is not a reliable success-rate estimate; room diversity does not prove distinct router paths. MAC outcomes are radio frames, not household commands. Placement A/B does not isolate USB3 noise from antenna geometry.'},indent=2))
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__)

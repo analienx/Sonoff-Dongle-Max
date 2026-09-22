@@ -56,13 +56,15 @@ async function main(){if(!cfg.mqtt?.server)throw Error('no_mqtt_config');
  const pool=new Set(candidates(devices).map(d=>d.friendly_name));
  const names=fixed===null?select(devices):fixed;
  if(!Array.isArray(names)||names.length<8||names.length>MAX||new Set(names).size!==names.length||
-   names.some(n=>!pool.has(n))||new Set(names.map(zone)).size<4)
+   (fixed===null&&names.some(n=>!pool.has(n)))||names.some(n=>!zone(n)||unpowered(n))||new Set(names.map(zone)).size<4)
   return finish({status:'sample_validation_failed',results:[],eligible_count:pool.size});
  await new Promise((ok,no)=>client.subscribe(names.map(n=>base+'/'+n),{qos:0},e=>e?no(e):ok()));
  const results=[];
- for(const n of names){if(finished)return;results.push(await read(n));
+ for(const n of names){if(finished)return;
+  if(!pool.has(n))results.push({name:n,status:'inventory_missing_or_not_gettable',latency_ms:null});
+  else results.push(await read(n));
   await new Promise(r=>setTimeout(r,350));}
- finish({status:'complete',names,results,eligible_count:pool.size,zone_count:new Set(names.map(zone)).size});
+ finish({status:'complete',names,results,eligible_count:pool.size,zone_count:new Set(names.map(zone)).size,measurement:'fresh_nonretained_state_proxy_not_transaction_correlated'});
 }
 client.on('message',(topic,buf,packet)=>{
  if(topic===base+'/bridge/devices'){try{devices=JSON.parse(buf.toString());}catch{}return;}
@@ -104,8 +106,9 @@ def run(fixed=None):
         result=json.loads(raw.strip().splitlines()[-1])
         if result.get('status')!='complete' or result.get('same_owner_epoch') is not True:
             raise RuntimeError('multizone_probe_incomplete:'+str(result.get('status')))
-        if result.get('zone_count',0)<4 or len(result.get('results',[]))!=len(result.get('names',[])):
-            raise RuntimeError('insufficient_verified_sample')
+        if result.get('zone_count',0)<4 or len(result.get('results',[]))!=len(result.get('names',[])) or \
+            [row.get('name') for row in result.get('results',[])]!=result.get('names'):
+            raise RuntimeError('inconsistent_device_sample')
         return result
     finally: cli.close()
 
