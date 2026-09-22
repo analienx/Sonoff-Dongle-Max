@@ -1,0 +1,20 @@
+# Issue #27 — SONOFF placement A/B, verified pre-move baseline
+
+**Canonical experiment/acceptance issue:** [#27](https://github.com/analienx/Sonoff-Dongle-Max/issues/27). Parent baseline [#19](https://github.com/analienx/Sonoff-Dongle-Max/issues/19); epic [#18](https://github.com/analienx/Sonoff-Dongle-Max/issues/18). Implementation [PR #25](https://github.com/analienx/Sonoff-Dongle-Max/pull/25), commit `88f0a5f`; owner-safe gate [analienx/config PR #61](https://github.com/analienx/config/pull/61), commit `ef53dbe`.
+
+## Controlled baseline A — 2026-09-22
+
+- **Placement:** Entire SONOFF reportedly ~10 cm from the Raspberry Pi / external USB3 SSD; this is not yet proof of local EMI. Existing Zigbee channel, TX, identities and pairings unchanged; no production firmware flash or broad network map.
+- **Sampling:** 299.4 s effective non-clearing NCP counter window; same fixed cohort of **11 known-powered router endpoints**, three staggered owner-local `endpoint.read('genOnOff',['onOff'])` attempts each; **33/33 verified ZCL read replies**, not MQTT state proxies. Deliberately unpowered workroom left/right dimmers, bedroom bulbs and living-room circle lights excluded.
+- **MAC:** 694 successful and 82 failed unicast frames; failure fraction `82/(694+82)=10.567%`; 426 MAC retries, 47 failed clear-channel assessments. These are radio frame outcomes, **not 33 command failures**.
+- **APS/routing:** 602 APS unicast successes, 4 APS unicast failures, 11 initiated route discoveries. No packet-buffer allocation, PHY-to-MAC queue, retry-queue, broadcast-table-full or ASH resource-failure events reported in the delta.
+- **Neighbors/source routes:** Direct-neighbor table **26/26** at both ends; 31 neighbor additions + 31 removals (~12.426 combined events/min); 20 stale entries. Exactly 5 distinct identities departed and 5 distinct identities entered across the two snapshots; 21 entries remained present. Source-route occupancy **81/254** at both ends. The distinction between total churn events and distinct peers matters.
+- **Integrity:** Script returned `valid=true`, original+final Zigbee2MQTT owner epochs matched, counter-clear audit `status=ok` and `clear_markers=0`; both NCP snapshots and the one-shot 33-read gate reported `status=ok`, unchanged owner epoch and temporary extension file absent afterward. The original MQTT-only baseline remains separate and cannot be retroactively considered verified ZCL evidence.
+
+## Source and retention policy
+
+The exact baseline raw data was originally saved on the authorized Zephyrus as `C:\Workspace\.analienx\sonoff-private\r60_placement_v2_before.json` and corresponding privately named NCP / ZCL one-shot results. This is **a historical capture path, not a Git artifact**, and is not a recommended long-term evidence directory. Keep the original immutable for continuity until issue-specific private relocation has been verified byte-for-byte; configure subsequent A/B results to use the same issue-specific private directory. Raw IEEE/NWK device mappings, keys, access details and unsanitized host logs **must not enter this public repository**. The repository owns reproducible source, tests, procedure and sanitized outcome reports; the config repository owns only the execution/safety gate.
+
+## Next step and interpretation
+
+Physically relocate the **whole** SONOFF >=1 m from Pi, SSD and USB3 cable while preserving antenna orientation if possible. Record the placement change and run the fixed-cohort `after --relocated --seconds 300` stage and `report` from `deploy/r60_placement_experiment.py`, then an optional B repeat under comparable household traffic. Validate counter-clear coverage, unchanged owner, completed cleanup and per-device ZCL results before interpreting RF counters. A short drop in MAC errors and churn would support a placement-related contribution; it cannot by itself isolate USB3 interference from changed antenna geometry or establish that the full mesh works flawlessly. **No B measurement has been taken at this point.**
