@@ -23,7 +23,7 @@ remove_private=re.compile(r'(?i)(?:0x)?[0-9a-f]{16}')
 redact_sensitive=re.compile(r'(?i)(?:password|network.key|secret|token|mqtt.password)[^:]*[:=].*')
 counts=collections.Counter();per_session=collections.defaultdict(collections.Counter);templates=collections.Counter();example={};transitions=[]
 with tarfile.open(path[0],'r:gz') as archive:
- for file in sorted(m for m in archive if m.name.startswith('private/log/') and m.name.endswith('.log')):
+ for file in sorted((m for m in archive if m.name.startswith('private/log/') and m.name.endswith('.log')),key=lambda m:m.name):
   session=file.name.split('/')[2]
   for raw in archive.extractfile(file):
    line=raw.decode('utf-8','replace').strip()
