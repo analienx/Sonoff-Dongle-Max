@@ -19,6 +19,14 @@ def make(t0, *, mac_success=1000, mac_failed=100, added=25, removed=25, cca=10, 
 
 class WindowTest(unittest.TestCase):
     def setUp(self): self.now=datetime(2026,9,22,12,0,0,tzinfo=timezone.utc)
+    def test_intentionally_unpowered_exclusions(self):
+        for name in ('WorkroomTableRightDimmer','WorkroomTableLeftDimmer',
+                     'BedroomBulb1','LivingRoomCircle1'):
+            self.assertTrue(mod.intentionally_unpowered(name), name)
+        for name in ('WorkroomSwitchLedsTable','HallBulb1','LivingRoomSocketHA',
+                     'KitchenSocketFridge','BathroomSwitchRouter'):
+            self.assertFalse(mod.intentionally_unpowered(name), name)
+
     def test_matched_delta_and_rates(self):
         a=make(self.now)
         b=make(self.now+timedelta(seconds=180),mac_success=2000,mac_failed=200,added=40,removed=40,cca=30)

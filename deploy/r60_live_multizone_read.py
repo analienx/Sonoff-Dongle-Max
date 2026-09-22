@@ -20,6 +20,7 @@ const cfg=yaml.load(fs.readFileSync('/config/zigbee2mqtt/configuration.yaml','ut
 const base=cfg.mqtt?.base_topic||'zigbee2mqtt';
 const fixed=JSON.parse(Buffer.from(process.argv[1]||'bnVsbA==','base64').toString('utf8'));
 const ZONES=['Hall','Kitchen','LivingRoom','Workroom','Bathroom','Toilet','Entry','Balcony','Nursery','Corridor','Utility'];
+const unpowered=n=>/^Bedroom.*Bulb|^LivingRoom.*Circle|^Workroom.*(?:Left|Right).*Dimmer|^Workroom.*Dimmer.*(?:Left|Right)/i.test(n);
 const MAX=12, TIMEOUT=6500;
 const client=mqtt.connect(cfg.mqtt.server,{username:cfg.mqtt.user||undefined,password:cfg.mqtt.password||undefined,
  reconnectPeriod:0,connectTimeout:4000,clean:true,clientId:'r60-multizone-'+crypto.randomBytes(5).toString('hex')});
@@ -30,7 +31,7 @@ function finish(r){if(finished)return;finished=true;clearTimeout(globalTimeout);
 function gettable(es){return Array.isArray(es)&&es.some(e=>((e?.property==='state')&&((e.access&4)!==0))||gettable(e?.features));}
 function zone(n){return ZONES.find(z=>n.startsWith(z))||null;}
 function candidates(ds){return ds.filter(d=>d.type==='Router'&&d.supported!==false&&d.interview_completed!==false&&
- typeof d.friendly_name==='string'&&zone(d.friendly_name)&&!/^Bedroom/i.test(d.friendly_name)&&
+ typeof d.friendly_name==='string'&&zone(d.friendly_name)&&!/^Bedroom/i.test(d.friendly_name)&&!unpowered(d.friendly_name)&&
  !/Breaker|MainMeter|Shutdown|Energy|Meter/i.test(d.friendly_name)&&gettable(d.definition?.exposes));}
 function select(ds){const pool=candidates(ds),chosen=[],seen=new Set();
  for(let round=0;round<3;round++)for(const z of ZONES){

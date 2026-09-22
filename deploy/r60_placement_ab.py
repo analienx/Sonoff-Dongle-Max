@@ -15,6 +15,13 @@ from datetime import datetime, timezone
 PRIVATE = Path(r'C:\Workspace\.analienx\sonoff-private')
 GATE = Path(r'C:\Workspace\worktrees\config-r60-owner-gate\supervisor\safety\r60_z2m_neighbor_gate.py')
 from r60_live_multizone_read import run as multizone_read
+# Powered-off-by-design cohort: never use these as delivery or availability failures.
+# A no-response from another device is still inconclusive unless power is confirmed.
+import re
+
+def intentionally_unpowered(name):
+    return bool(re.search(r'^Bedroom.*Bulb|^LivingRoom.*Circle|^Workroom.*(?:Left|Right).*Dimmer|^Workroom.*Dimmer.*(?:Left|Right)', name, re.I))
+
 FIELDS = ('MAC_TX_UNICAST_SUCCESS','MAC_TX_UNICAST_FAILED','MAC_TX_UNICAST_RETRY',
           'NEIGHBOR_ADDED','NEIGHBOR_REMOVED','NEIGHBOR_STALE','PHY_CCA_FAIL_COUNT',
           'APS_DATA_TX_UNICAST_SUCCESS','APS_DATA_TX_UNICAST_FAILED',
@@ -76,7 +83,9 @@ def stage(phase, seconds):
         previous=json.loads((PRIVATE/'r60_placement_before.json').read_text(encoding='utf8'))
         if not previous.get('valid') or not previous.get('multizone_probe',{}).get('names'):
             raise RuntimeError('missing_valid_multizone_baseline')
-        frozen=previous['multizone_probe']['names']
+        frozen=[n for n in previous['multizone_probe']['names'] if not intentionally_unpowered(n)]
+        if len(frozen)<8:
+            raise RuntimeError('insufficient_confirmed_powered_baseline_targets')
     probe=multizone_read(frozen)
     if probe['status']!='complete' or probe['same_owner_epoch'] is not True:
         raise RuntimeError('multizone_sample_failed')
@@ -111,10 +120,11 @@ def report():
         verdict='both indicators worse; restore prior placement if devices are affected'
     else: verdict='mixed/insufficient evidence; do not attribute cause from this short comparison'
     pa,pb=before['multizone_probe'],after['multizone_probe']
-    if pa.get('names')!=pb.get('names') or pa.get('zone_count',0)<4:
+    eligible=[n for n in pa.get('names',[]) if not intentionally_unpowered(n)]
+    if eligible!=pb.get('names') or pa.get('zone_count',0)<4:
         raise RuntimeError('device_cohort_changed_between_placements')
     def outcome(p):
-        outcomes=p['results'];success=[x for x in outcomes if x['status']=='fresh_state']
+        outcomes=[x for x in p['results'] if x['name'] in eligible];success=[x for x in outcomes if x['status']=='fresh_state']
         timings=sorted(x['latency_ms'] for x in success)
         return {'attempted':len(outcomes),'verified_fresh':len(success),
                 'success_fraction':round(len(success)/len(outcomes),3),
@@ -131,7 +141,8 @@ def report():
         verdict+='; insufficient verified multi-zone responses for a reliability claim'
     print(json.dumps({'verdict':verdict,'relative_changes_pct':changes,'traffic_ratio_after_before':round(load,3),
         'before':{k:a[k] for k in metrics},'after':{k:b[k] for k in metrics},
-        'before_devices':before_out,'after_devices':after_out,'fixed_sample_names':pa['names'],
+        'before_devices':before_out,'after_devices':after_out,'fixed_sample_names':eligible,
+        'excluded_by_design':[n for n in pa['names'] if intentionally_unpowered(n)],
         'note':'Fresh non-retained states are device-response proxies, not proof of correlated ZCL read; room diversity does not prove distinct router paths. MAC outcomes are radio frames, not household commands. Placement A/B does not isolate USB3 noise from antenna geometry.'},indent=2))
 
 def main():
