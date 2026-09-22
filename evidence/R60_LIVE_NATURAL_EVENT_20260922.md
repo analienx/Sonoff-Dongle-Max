@@ -1,0 +1,11 @@
+# Bounded natural many-to-one route-event test on production — 2026-09-22
+
+User explicitly requested testing the *live SONOFF coordinator*, not an isolated spare. This complements `R60_LIVE_OWNER_ZCL_READ_20260922.md`, which documents one fresh read-only `HallBulb1/get` response 141 ms after its request.
+
+`deploy/r60_live_route_event_probe.py` uses the canonical host-key-verified HA SSH alias and existing sole Zigbee2MQTT/Ember UART owner, subscribing via an ephemeral **MQTT-only** client to existing `bridge/logging` and retained `bridge/devices`. It has a hard 45-second natural-event observation window, sends **at most one** read-only `/get` to a currently known and get-capable Router only *if* a matching `ROUTE_ERROR_MANY_TO_ONE_ROUTE_FAILURE` event occurs, excludes intentionally relay-unpowered BedroomBulb1/2/3, and allows at most 12 seconds for a fresh non-retained response. No broken link is induced; no map, UART takeover, route-flood, firmware, channel/TX, restart, pairing or config change.
+
+Initial attempt stopped in 43 ms with `bridge_not_online` because the client only accepted a literal string status; actual bridge-state messages can be JSON. It sent **zero** read requests. The parser was corrected to accept JSON state before the event test was rerun. This is a client-side protocol-format correction, not a coordinator restart.
+
+**Completed bounded live result:** `status=no_eligible_route_error_within_45s`; `route_errors_seen=0`; `eligible_router_events=0`; `read_requests_sent=0`; `elapsed_ms=45003`; `same_owner_epoch=true`; `one_owner_preflight=true`. This means no matching events appeared *on the subscribed Z2M logging topic* in that short window, not that there were no on-air failures anywhere, and not that historical route failures have been fixed. No post-error path read was sent and **automatic many-to-one route recovery remains unverified**.
+
+Do not substitute this result for a physical link-loss/recovery pass or claim a repaired route from the separate successful Hall-bulb read. If later work needs on-device neighbor or broadcast-admission state, obtain it through the existing Z2M serial owner using an explicitly reviewed, reversible diagnostic path; do not install the still-staged extension via ad-hoc MQTT or a second serial process.
