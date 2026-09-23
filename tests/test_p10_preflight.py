@@ -54,7 +54,10 @@ class P10ProbeTests(unittest.TestCase):
     def test_version_requires_complete_payload(self):
         version = probe.version_details(bytes([2, 1, 3, 0, 1, 1, 2, 3, 4]))
         self.assertEqual(version["revision_raw_uint32"], 0x04030201)
-        for length in (0, 4, 6, 8):
+        extended = probe.version_details(bytes([2, 1, 2, 7, 1, 0x41, 0xd9, 0x34, 0x01, 0]))
+        self.assertEqual(extended["revision_raw_uint32"], 20240705)
+        self.assertEqual(extended["uninterpreted_extension_hex"], "00")
+        for length in (0, 4, 6, 8, 11):
             with self.assertRaises(ValueError):
                 probe.version_details(bytes(length))
     def test_refuse_non_usb_or_unconfirmed_port(self):

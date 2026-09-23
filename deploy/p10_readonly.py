@@ -47,12 +47,14 @@ def receive(ser, command: tuple[int, int], deadline: float) -> bytes:
 
 
 def version_details(data: bytes) -> dict:
-    if len(data) not in (5, 9):
+    if len(data) not in (5, 9, 10):
         raise ValueError("Unexpected or truncated SYS_VERSION response length")
     result = dict(zip(("transport_rev", "product", "major", "minor", "maintenance"), data[:5]))
     if len(data) >= 9:
         result["revision_raw_uint32"] = int.from_bytes(data[5:9], "little")
     result["version_payload_length"] = len(data)
+    if len(data) == 10:
+        result["uninterpreted_extension_hex"] = data[9:].hex()
     return result
 
 
