@@ -1,0 +1,45 @@
+{
+  "purpose": "Public evidence matrix; no private identifiers or actual network backup",
+  "candidates": [
+    {
+      "name": "SMLIGHT SLZB-06P10 factory image: exact version pending USB inspection",
+      "board": "SLZB-06P10",
+      "role": "coordinator",
+      "adapter": "zstack",
+      "image": null,
+      "capacities": {},
+      "migration": "not-tested",
+      "groupcast_passed": false
+    },
+    {
+      "name": "SMLIGHT latest exact-board image: exact download/build not established",
+      "board": "SLZB-06P10",
+      "role": "coordinator",
+      "adapter": "zstack",
+      "image": null,
+      "capacities": {},
+      "migration": "not-tested",
+      "groupcast_passed": false
+    },
+    {
+      "name": "Koenkk 20250321: CC2674P10 downloadable build listed WIP",
+      "board": "unverified",
+      "role": "coordinator",
+      "adapter": "zstack",
+      "image": null,
+      "capacities": {},
+      "migration": "not-tested",
+      "groupcast_passed": false
+    },
+    {
+      "name": "SONOFF Dongle-PP10 stock 20250321: different board; not flash compatible",
+      "board": "SONOFF Dongle-PP10",
+      "role": "coordinator",
+      "adapter": "zstack",
+      "image": null,
+      "capacities": {},
+      "migration": "not-tested",
+      "groupcast_passed": false
+    }
+  ]
+}
