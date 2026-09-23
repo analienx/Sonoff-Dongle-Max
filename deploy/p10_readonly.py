@@ -62,10 +62,12 @@ def ports() -> list[dict]:
     except ImportError as exc:
         raise RuntimeError("Install pyserial: py -3 -m pip install pyserial") from exc
     return [{"port": p.device, "description": p.description, "vid": p.vid, "pid": p.pid,
-             "manufacturer": p.manufacturer} for p in list_ports.comports()]
+             "manufacturer": p.manufacturer, "serial_number": p.serial_number,
+             "location": p.location} for p in list_ports.comports()]
 
 
-def inspect(port: str, baud: int, production_port: str | None, expected_vid: int | None = None, expected_pid: int | None = None) -> dict:
+def inspect(port: str, baud: int, production_port: str | None, expected_vid: int | None = None, expected_pid: int | None = None,
+            expected_serial_number: str | None = None, expected_location: str | None = None) -> dict:
     if not re.fullmatch(r"COM\d+|/dev/(?:serial/by-id/[A-Za-z0-9_.:-]+|ttyUSB\d+|ttyACM\d+)", port, re.I):
         raise ValueError("Only an explicit local USB serial device is allowed")
     if production_port and port.lower() == production_port.lower():
@@ -75,6 +77,12 @@ def inspect(port: str, baud: int, production_port: str | None, expected_vid: int
     matches = [p for p in ports() if p["port"].lower() == port.lower()]
     if len(matches) != 1 or matches[0]["vid"] != expected_vid or matches[0]["pid"] != expected_pid:
         raise ValueError("Selected USB port missing or VID/PID mismatch; refusing to open")
+    if not expected_serial_number and not expected_location:
+        raise ValueError("Explicit USB serial number or bus location required; VID/PID alone are not unique")
+    if expected_serial_number and matches[0].get("serial_number") != expected_serial_number:
+        raise ValueError("USB serial number mismatch; refusing port")
+    if expected_location and matches[0].get("location") != expected_location:
+        raise ValueError("USB bus location mismatch; refusing port")
     import serial
     ser = serial.Serial(port=None, baudrate=baud, timeout=0.4, write_timeout=1)
     ser.port = port
@@ -94,7 +102,11 @@ def inspect(port: str, baud: int, production_port: str | None, expected_vid: int
             else:
                 outcome["firmware"] = version_details(payload)
         return {"probe": "ZNP read-only ping/version", "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                "port": port, "baud": baud, "result": outcome,
+                "port": port, "baud": baud,
+                "usb_bridge": {"vid": expected_vid, "pid": expected_pid,
+                               "serial_sha256": hashlib.sha256(expected_serial_number.encode("utf-8")).hexdigest() if expected_serial_number else None,
+                               "location": expected_location},
+                "physical_board_model": "NOT_ATTESTED_BY_USB", "result": outcome,
                 "neighbor_capacity": "UNKNOWN: not exposed by SYS_VERSION",
                 "tclk_capacity": "UNKNOWN: not exposed by SYS_VERSION"}
     finally:
@@ -130,6 +142,8 @@ def main(argv=None) -> int:
     usb.add_argument("--production-port", help="Refuse this production port")
     usb.add_argument("--vid", type=lambda x: int(x, 0), required=True, help="USB VID shown by ports, e.g. 0x1A86")
     usb.add_argument("--pid", type=lambda x: int(x, 0), required=True, help="USB PID shown by ports")
+    usb.add_argument("--serial-number", help="Exact USB serial number shown by ports")
+    usb.add_argument("--usb-location", help="Exact USB bus location shown by ports, when serial absent")
     usb.add_argument("--isolated-host-confirmed", action="store_true", required=True)
     usb.add_argument("--out", type=Path, help="Create exclusive private JSON result; never overwrite")
     image = sub.add_parser("artifact", help="Offline SHA-256 fingerprint of downloaded exact firmware")
@@ -145,7 +159,7 @@ def main(argv=None) -> int:
                 raise ValueError("Use a separate host, verify this is the new P10, then set --isolated-host-confirmed")
             if args.out and args.out.exists():
                 raise FileExistsError(args.out)
-            result = inspect(args.port, args.baud, args.production_port, args.vid, args.pid)
+            result = inspect(args.port, args.baud, args.production_port, args.vid, args.pid, args.serial_number, args.usb_location)
             if args.out:
                 save_exclusive(args.out, result)
         print(json.dumps(result, indent=2, sort_keys=True))

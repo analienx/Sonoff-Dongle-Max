@@ -70,6 +70,17 @@ class P10ProbeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 probe.inspect("COM5", 115200, None, 12, 34)
 
+    def test_reject_usb_bridge_same_vid_pid_but_wrong_unit_identity(self):
+        port = {"port": "COM4", "vid": 0x10c4, "pid": 0xea60,
+                "serial_number": "NEW-P10", "location": "1-3"}
+        with patch.object(probe, "ports", return_value=[port]):
+            with self.assertRaisesRegex(ValueError, "serial number or bus location"):
+                probe.inspect("COM4", 115200, None, 0x10c4, 0xea60)
+            with self.assertRaisesRegex(ValueError, "serial number mismatch"):
+                probe.inspect("COM4", 115200, None, 0x10c4, 0xea60, "OLD-SONOFF")
+            with self.assertRaisesRegex(ValueError, "bus location mismatch"):
+                probe.inspect("COM4", 115200, None, 0x10c4, 0xea60, None, "1-4")
+
     def test_immutable_output(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "capture.json"
@@ -100,13 +111,18 @@ class P10FirmwareTests(unittest.TestCase):
 
     def verify(self, candidate):
         return audit.verify_candidate(candidate, target_board="SLZB-06P10",
-                                      min_neighbor=60, min_tclk=100)
+                                      min_neighbor=60, min_tclk=100, actual_image_sha256="a" * 64)
 
     def test_phase_a_not_confused_with_later_migration(self):
         outcome = self.verify(self.complete())
-        self.assertEqual(outcome["status"], "PHASE_A_EVIDENCE_COMPLETE_REVIEW_REQUIRED")
+        self.assertEqual(outcome["status"], "MANIFEST_FIELDS_COMPLETE_UNVERIFIED")
         self.assertFalse(outcome["production_migration_authorized"])
         self.assertEqual(outcome["groupcast_test"], "not-proven")
+
+    def test_self_reported_manifest_without_image_bytes_is_blocked(self):
+        result = audit.verify_candidate(self.complete(), target_board="SLZB-06P10",
+                                        min_neighbor=60, min_tclk=100)
+        self.assertEqual(result["status"], "BLOCKED")
 
     def test_wrong_board_and_unlinked_image_blocked(self):
         candidate = self.complete()
@@ -131,6 +147,23 @@ class P10FirmwareTests(unittest.TestCase):
         candidate = self.complete()
         candidate["image"]["sha256"] = "deadbeef"
         self.assertEqual(self.verify(candidate)["status"], "BLOCKED")
+
+    def test_cli_even_complete_manifest_exits_nonzero_without_verified_capacity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            local_image = Path(folder) / "synthetic.hex"
+            local_image.write_bytes(b"synthetic image only")
+            digest = probe.hashlib.sha256(local_image.read_bytes()).hexdigest()
+            candidate = self.complete()
+            candidate["image"]["sha256"] = digest
+            for value in candidate["capacities"].values():
+                value["image_sha256"] = digest
+            manifest = Path(folder) / "candidates.json"
+            manifest.write_text(json.dumps({"candidates": [candidate]}), encoding="utf-8")
+            with patch("sys.stdout", new_callable=io.StringIO) as output:
+                code = audit.main([str(manifest), "--target-board", "SLZB-06P10",
+                                   "--image", str(local_image)])
+            self.assertEqual(code, 4)
+            self.assertIn("MANIFEST_FIELDS_COMPLETE_UNVERIFIED", output.getvalue())
 
     def test_manifest_unknown_fails_and_exit_nonzero(self):
         folder = Path(__file__).resolve().parents[1]
