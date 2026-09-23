@@ -47,8 +47,8 @@ def receive(ser, command: tuple[int, int], deadline: float) -> bytes:
 
 
 def version_details(data: bytes) -> dict:
-    if len(data) < 5:
-        raise ValueError("Truncated SYS_VERSION response")
+    if len(data) not in (5, 9):
+        raise ValueError("Unexpected or truncated SYS_VERSION response length")
     result = dict(zip(("transport_rev", "product", "major", "minor", "maintenance"), data[:5]))
     if len(data) >= 9:
         result["revision_raw_uint32"] = int.from_bytes(data[5:9], "little")
@@ -65,11 +65,16 @@ def ports() -> list[dict]:
              "manufacturer": p.manufacturer} for p in list_ports.comports()]
 
 
-def inspect(port: str, baud: int, production_port: str | None) -> dict:
+def inspect(port: str, baud: int, production_port: str | None, expected_vid: int | None = None, expected_pid: int | None = None) -> dict:
     if not re.fullmatch(r"COM\d+|/dev/(?:serial/by-id/[A-Za-z0-9_.:-]+|ttyUSB\d+|ttyACM\d+)", port, re.I):
         raise ValueError("Only an explicit local USB serial device is allowed")
     if production_port and port.lower() == production_port.lower():
         raise ValueError("Refusing the named production coordinator port")
+    if expected_vid is None or expected_pid is None:
+        raise ValueError("Explicit VID/PID from prior USB enumeration are required")
+    matches = [p for p in ports() if p["port"].lower() == port.lower()]
+    if len(matches) != 1 or matches[0]["vid"] != expected_vid or matches[0]["pid"] != expected_pid:
+        raise ValueError("Selected USB port missing or VID/PID mismatch; refusing to open")
     import serial
     ser = serial.Serial(port=None, baudrate=baud, timeout=0.4, write_timeout=1)
     ser.port = port
@@ -123,6 +128,8 @@ def main(argv=None) -> int:
     usb.add_argument("--port", required=True)
     usb.add_argument("--baud", type=int, choices=(115200, 460800, 921600), default=115200)
     usb.add_argument("--production-port", help="Refuse this production port")
+    usb.add_argument("--vid", type=lambda x: int(x, 0), required=True, help="USB VID shown by ports, e.g. 0x1A86")
+    usb.add_argument("--pid", type=lambda x: int(x, 0), required=True, help="USB PID shown by ports")
     usb.add_argument("--isolated-host-confirmed", action="store_true", required=True)
     usb.add_argument("--out", type=Path, help="Create exclusive private JSON result; never overwrite")
     image = sub.add_parser("artifact", help="Offline SHA-256 fingerprint of downloaded exact firmware")
@@ -138,7 +145,7 @@ def main(argv=None) -> int:
                 raise ValueError("Use a separate host, verify this is the new P10, then set --isolated-host-confirmed")
             if args.out and args.out.exists():
                 raise FileExistsError(args.out)
-            result = inspect(args.port, args.baud, args.production_port)
+            result = inspect(args.port, args.baud, args.production_port, args.vid, args.pid)
             if args.out:
                 save_exclusive(args.out, result)
         print(json.dumps(result, indent=2, sort_keys=True))

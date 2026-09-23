@@ -1,6 +1,6 @@
 # P10 candidate evaluation — separate from production SONOFF
 
-Tracking: reliability epic #18, neighbor investigation #28. This kit audits **SLZB-06P10/P10U firmware**, without changing Zigbee2MQTT, network identity, IEEE address, keys, NVRAM, channel, or pairing. Tested only with mocked ZNP serial frames until a P10 is physically connected.
+Tracking: dedicated migration-preparation issue #29; context #18 and #28. This kit audits **the specifically identified SMLIGHT CC2674P10 board** (06P10, 06P10U or MR4U Zigbee radio), without changing Zigbee2MQTT, network identity, IEEE address, keys, NVRAM, channel, or pairing. Tested only with mocked ZNP serial frames until a P10 is physically connected.
 
 ## 1. Read-only identification on Zephyrus
 
@@ -9,10 +9,10 @@ Leave the SONOFF as the only production coordinator on the Raspberry Pi. Attach 
 ```powershell
 py -3 -m pip install pyserial
 py -3 deploy/p10_readonly.py ports
-py -3 deploy/p10_readonly.py inspect --port COM7 --baud 115200 --isolated-host-confirmed --out C:/Workspace/.analienx/sonoff-private/issues/p10/p10-usb-identification.json
+py -3 deploy/p10_readonly.py inspect --port COM7 --vid 0x1234 --pid 0x5678 --baud 115200 --isolated-host-confirmed --out C:/Workspace/.analienx/sonoff-private/issues/p10/p10-usb-identification.json
 ```
 
-Replace COM7 with the P10's enumerated port. The script opens only that port, deasserts DTR/RTS before opening it, and sends **only ZNP SYS_PING and SYS_VERSION**. Opening some USB serial bridges may still change DTR/RTS momentarily at the OS/driver level; avoid a production coordinator regardless. Baud options: 115200, 460800, 921600; select the vendor-documented rate. The script never retries other ports automatically or resets the chip. A failed response is `UNKNOWN`, not proof that the firmware is unsupported. Preserve the original factory image; do not flash during this stage. The output stores no IEEE addresses or keys. Never publish raw serial logs or network backups.
+Replace COM7, VID and PID with values printed by `ports` for the physically identified **new** unit; example IDs are placeholders and deliberately fail unless they match. Matching VID/PID identifies only the USB bridge, not the P10 board: check the unit label and owner independently. The script refuses to open an absent or changed USB port. The script opens only that port, deasserts DTR/RTS before opening it, and sends **only ZNP SYS_PING and SYS_VERSION**. Opening some USB serial bridges may still change DTR/RTS momentarily at the OS/driver level; avoid a production coordinator regardless. Baud options: 115200, 460800, 921600; select the vendor-documented rate. The script never retries other ports automatically or resets the chip. A failed response is `UNKNOWN`, not proof that the firmware is unsupported. Preserve the original factory image; do not flash during this stage. The output stores no IEEE addresses or keys. Never publish raw serial logs or network backups.
 
 ## 2. Firmware/image audit
 
@@ -20,10 +20,10 @@ The response is a firmware-reported ZNP version, **not** a vendor-unique build h
 
 ```powershell
 py -3 deploy/p10_readonly.py artifact C:/path/to/EXACT-vendor-P10-coordinator.hex
-py -3 deploy/p10_firmware_audit.py docs/p10_firmware_candidates.json --min-neighbor 60 --min-tclk 100
+py -3 deploy/p10_firmware_audit.py docs/p10_firmware_candidates.json --target-board SLZB-06P10 --min-neighbor 60 --min-tclk 100
 ```
 
-Update the candidate manifest only with values from the **exact image's** build config, map file, vendor confirmation, or independently observed proof (record provenance and SHA-256). `MAX_NEIGHBOR_ENTRIES=50` in a *different* CC2652P7 build does not prove a P10 image is configured likewise. Standard Mgmt_Lqi responses show current neighbor entries, not allocated maximum. A candidate must also have adequate routing, source-route and TCLK tables and an independently validated groupcast path; successful USB identification alone is never a migration decision. `--min-tclk 100` is a provisional conservative planning threshold, **not** a claim that every joined router consumes one TCLK record. Determine the actual backup key-record demand privately without publishing keys.
+Select `--target-board` only after reading the exact physical model (use SLZB-06P10U or SLZB-MR4U instead when appropriate). Update the candidate manifest only with values from the **exact image's** build configuration, map file or documented vendor confirmation (record each table's `proof`, HTTPS `evidence_url`, `image_sha256` and exact local image hash, source, version and board revision). This script checks *metadata completeness*, not the truth of the asserted capacity: independently inspect linked source/build evidence before proceeding. Missing values return `BLOCKED` and exit code 3; valid metadata returns `PHASE_A_EVIDENCE_COMPLETE_REVIEW_REQUIRED`, never a permission to migrate. `MAX_NEIGHBOR_ENTRIES=50` in a *different* CC2652P7 build does not prove a P10 image is configured likewise. Standard Mgmt_Lqi responses show current neighbor entries, not allocated maximum. Phase A records six distinct tables (direct neighbors, TCLK, link keys, children, routing, source routes). Groupcast, unicast, real neighbor relationships, backup restore and security frame-counter monotonicity are separate later physical/migration gates: Phase A never marks production migration ready. Successful USB identification alone is never a capacity measurement or a migration decision. `--min-tclk 100` is a provisional conservative planning threshold, **not** a claim that every joined router consumes one TCLK record. Determine the actual backup key-record demand privately without publishing keys.
 
 ## 3. Candidate comparison / public evidence
 
