@@ -1,0 +1,41 @@
+# Issue #28 — neighbor selection, bidirectional-cost and route-cache mechanism baseline
+
+**Date:** 2026-09-22. Owner: [#28](https://github.com/analienx/Sonoff-Dongle-Max/issues/28), baseline [#19](https://github.com/analienx/Sonoff-Dongle-Max/issues/19), reliability epic [#18](https://github.com/analienx/Sonoff-Dongle-Max/issues/18). Input: immutable [#27 placement evidence](../issue-27/R60_PLACEMENT_AFTER_20260922.md). Source: `deploy/r60_neighbor_mechanisms.py`, offline tests: `tests/test_r60_neighbor_mechanisms.py`. This is **not** firmware, a new live probe, an RF spectrum capture, or a network repair.
+
+## What we actually measured
+
+The issue #27 baseline A, valid relocated B (`after_retry1`), and B repeat (`confirm`) are three ~5-minute windows, with only two NCP-neighbor snapshots per window. Exclude the original rejected B run from RF statistics: its non-clearing NCP counter vector crossed an hourly reset. All three valid windows kept the same Z2M owner epoch and fixed 11-device powered cohort, completed 33/33 verified read-only ZCL reads each, and showed 26/26 direct-neighbor occupancy. Unpowered workroom dimmers, bedroom bulbs and living-room circle lights were excluded by design. **The snapshots cannot show the intermediate admission/eviction sequence or the actual radio path of a failed packet.**
+
+| Observation (at start of window unless noted) | Original A | Valid moved B | Moved B repeat |
+|---|---:|---:|---:|
+| Initially known-two-way / outgoing unknown (`outCost=0`) | 25 / 1 | 22 / 4 | 22 / 4 |
+| Distinct neighbors departed between two snapshots | 5 | 3 | 5 |
+| Departed peers that had `outCost=0` initially | 1 | 1 | 3 |
+| Departed peers already age >6 initially | 0 | 0 | 0 |
+| Median initial incoming LQI of departed / retained peers | 104 / 120 | 91 / 103 | 71 / 103 |
+| Cached source-route first hops absent from sampled direct-neighbor table, initial → final | 11/81 → 9/81 | 4/82 → 3/83 | 8/83 → 5/83 |
+| Initially cached source routes whose first hop subsequently departed | 9 | 1 | 5 |
+| MAC unicast failure fraction | 10.567% | 12.329% | 15.633% |
+| Neighbor add+remove counter events per minute | 12.426 | 15.198 | 17.606 |
+
+Across **six valid endpoint snapshots**, 39 distinct direct-neighbor identities were observed; 24 appeared in at least four snapshots. Six identities were observed in an *in–out–in* sample pattern. These are snapshot observations, **not** 39 concurrently required neighbors, six known eviction cycles, or confirmed device failures. The coordinator source-route table held only 81–83 entries of 254: cache capacity is not exhausted. Individual cached routes may be stale; table membership cannot establish whether their first hops were reachable on air.
+
+Exploratory aggregation of the three initial snapshots: **5/9 `outCost=0` observations** versus **8/69 with nonzero outgoing cost** were absent at their respective final snapshots. This is a *within-snapshot association*, not 78 independent routers or a causal risk estimate; peers and household traffic recur across windows and cost/age can change between samples. Zero originally stale age>6 among the departed does **not** disprove intermediate aging. No observed ZCL read failures in these cohorts means these captures **cannot** correlate cost transitions with real command failures.
+
+## Research and falsifiable mechanisms
+
+**A — link-status / asymmetric-link feedback.** Silicon Labs documents an unacknowledged one-hop Link Status broadcast around every 16 s (jitter), bidirectional `inCost`/`outCost`, and neighbor selection under table saturation. `outCost=0` means unknown outgoing cost, not automatically RF weakness or defective firmware. Ember routing can discard a route request that arrives through an unrecognized or unknown-outgoing-cost neighbor. Predictions: repeated unknown-cost/aging transitions among the same neighbors *before* route error bursts, or route error destinations sharing an unconfirmed first hop; null result: stable confirmed bidirectional costs through genuine command failures. Source: https://docs.silabs.com/zigbee/8.2.0/zigbee-fundamentals/04-zigbee-routing-concepts
+
+**B — RF contention/ACK loss independent of table selection.** MAC unicast success/failure, retries, CCA failures and APS delivery failures describe different layers. A rise in CCA is not a count of Wi-Fi-induced failures, and a successful ZCL read may consume multiple failed MAC attempts. Prediction: temporally clustered busy-channel observations and MAC/APS outcomes even while the neighbor set is stable; independent 802.15.4 packet capture or a supported per-destination NCP status is required to localize ACK loss. Do **not** change channel/TX or use a Wi-Fi SSID survey as an 802.15.4 spectrum measurement. Sources: https://docs.silabs.com/zigbee/9.0.2/sisdk-ezsp-reference-guide/03-protocol-format ; https://www.sciencedirect.com/science/article/pii/S1877050915019961
+
+**C — stale cached outbound source route vs failing inbound many-to-one route.** A source-route first hop missing from a direct-neighbor snapshot is *suggestive*, not proof of a failed on-air route. A concentrator's many-to-one request enqueued at its MAC does not attest arrival throughout the mesh; many-to-one paths are not automatically repaired in all circumstances. A route record proves a historical inbound path, not necessarily its continuing validity or the success of an outbound packet. Predictions: a genuine failed command with an observed next hop absent/unknown at that instant, or a downstream router failing to forward a concentrator-origin many-to-one request; null result: failures observed with confirmed neighbor/route status and independent RF evidence. Source: https://docs.silabs.com/zigbee/9.1.0/zigbee-stack-api/source-route
+
+**Algorithm inspiration — bidirectional delivery rather than hop count.** De Couto et al., *A High-Throughput Path Metric for Multi-Hop Wireless Routing* (2003), DOI 10.1145/938985.939000, uses expected retransmissions and both directions to evaluate routes. Its experiments were on **802.11**, not this Zigbee network; we do **not** fit per-link ETX from aggregate NCP counters or substitute host-side routing for the on-MG24 Zigbee stack. Use it as a measurement principle for a later per-next-hop study only.
+
+## Next executable discriminator and safety gate
+
+1. Use the existing sole-owner HA/Z2M passive logs to timestamp real *naturally occurring* user command failures, source-route and many-to-one errors, CCA/MAC counter intervals and owner restarts. Preserve the exact device set and known power-off exceptions; group on private IEEE identities locally, publish only minimum-size aggregate summaries. Do not inject switching or network-wide Mgmt_Lqi requests.
+2. **Before another live instrumentation deployment**, review whether pinned Ember/herdsman exposes per-message status/next-hop and Link Status reception without unsafe interception or queue starvation. If the target SDK lacks a supported observable callback, design an isolated receive-only 802.15.4 sniffer at channel 11 near the coordinator; it can reveal packet/ACK and Link Status timing where captured, but a single sniffer cannot prove the transmitter's local CCA state or coverage everywhere in the apartment. Decrypting private Zigbee payloads, if genuinely required, stays local under a separate security review; do not publish keys or raw addresses.
+3. Predeclare comparison windows and negative controls: stable neighbors with successful commands, unknown-cost peers retained versus departed, actual failed versus successful command destinations, per-device latency, and ambient traffic. Collect time-local first-hop states *around* failures, not only two five-minute endpoint snapshots. A full 60-direct-neighbor patch, unsolicited many-to-one floods, firmware flash, bulk pairing, TX/channel change and disruptive full network map are **not** authorized by this diagnosis.
+
+**Current conclusion:** the original 'only local Pi/SSD interference' explanation was not supported by issue #27. Unknown outgoing cost and cached-route-to-current-neighbor disagreement are concrete leads, not demonstrated causes. No new production change or firmware was made in this analysis.
