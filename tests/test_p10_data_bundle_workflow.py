@@ -38,7 +38,7 @@ def make_bundle(path, mode='hot', corrupt=False):
         for name, raw in payloads.items():
             archive.writestr(name, raw + (b'bad' if corrupt and name.endswith('custom.js') else b''))
         archive.writestr(bundle.MANIFEST_NAME, json.dumps({'format':'p10-z2m-data-bundle-v1',
-                                                           'mode':mode, 'files':records}))
+                                                           'mode':mode, 'app_stopped_throughout_capture':mode=='cold', 'files':records}))
 
 
 class BundleTests(unittest.TestCase):

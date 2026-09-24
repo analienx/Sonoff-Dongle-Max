@@ -33,7 +33,7 @@ def source_state(expected_sha256: str) -> dict:
             except FileNotFoundError:
                 continue
         valid = [root for root, digest in available if digest == expected_sha256]
-        if len(valid) != 1:
+        if not valid or len(valid) != len(available):
             raise RuntimeError('Live source YAML does not match the private cutover snapshot')
         return {'state': info['state'], 'source_yaml_matches': True,
                 'addon_boot_mode': info.get('boot'), 'addon_watchdog_configured': info.get('watchdog'),
@@ -43,9 +43,9 @@ def source_state(expected_sha256: str) -> dict:
 
 
 def freeze(out: Path, expected_sha256: str, approval: str) -> dict:
-    path = private_target(out)
     if approval != PHRASE:
         raise ValueError('Operator approval phrase does not match; no live actions performed')
+    path = private_target(out)
     if path.exists():
         raise FileExistsError('Cold recovery archive already exists')
     previous = source_state(expected_sha256)

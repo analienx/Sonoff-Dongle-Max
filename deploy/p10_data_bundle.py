@@ -137,6 +137,10 @@ def verify(path: Path) -> dict:
     with zipfile.ZipFile(path) as archive:
         _safe_names(archive)
         manifest = json.loads(archive.read(MANIFEST_NAME))
+        if manifest.get('format') != 'p10-z2m-data-bundle-v1' or manifest.get('mode') not in ('hot','cold'):
+            raise ValueError('Unknown or malformed private bundle manifest')
+        if manifest['mode'] == 'cold' and manifest.get('app_stopped_throughout_capture') is not True:
+            raise ValueError('Cold bundle lacks independently observed stopped-addon states')
         files = manifest['files']
         if not isinstance(files, dict) or not REQUIRED <= {n.removeprefix('data/') for n in files}:
             raise ValueError('Bundle does not include required recovery files')

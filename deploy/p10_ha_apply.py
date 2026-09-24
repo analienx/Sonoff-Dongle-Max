@@ -62,6 +62,10 @@ if info.get('options')!=p['expected_options']:
 # atomically replace YAML last. On failure before replace restore old options.
 tmp=root/('.p10-migration-'+uuid.uuid4().hex+'.tmp')
 fd=os.open(str(tmp),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+original_metadata=os.stat(str(cfg))
+os.fchmod(fd,stat.S_IMODE(original_metadata.st_mode))
+if os.geteuid()==0:
+ os.fchown(fd,original_metadata.st_uid,original_metadata.st_gid)
 updated_options=False
 try:
  with os.fdopen(fd,'wb') as file:
@@ -123,19 +127,22 @@ def live_plan(directory: Path, phase: str) -> dict:
     try:
         info = addon_info(client)
         sftp = client.open_sftp()
-        roots = []
+        roots, inconsistent = [], False
         for root in REMOTE_ROOTS:
             try:
                 with sftp.open(root+'/configuration.yaml','rb') as file:
                     if digest(file.read(2*1024*1024)) == digest(material['expected_yaml']):
                         roots.append(root)
+                    else:
+                        inconsistent = True
             except FileNotFoundError:
                 continue
+        unique_match = bool(roots) and not inconsistent
         return {'phase': phase,'addon_state':info['state'],
-                'expected_yaml_present':len(roots)==1,
+                'expected_yaml_present':unique_match,
                 'addon_options_match_expected':info['options']==material['expected_options'],
-                'data_root':roots[0] if len(roots)==1 else None,
-                'safe_to_apply_config': info['state']=='stopped' and len(roots)==1 and
+                'data_root':roots[0] if unique_match else None,
+                'safe_to_apply_config': info['state']=='stopped' and unique_match and
                        info['options']==material['expected_options'],
                 'radio_isolation_verified_by_software':False, 'live_change_performed':False}
     finally:
