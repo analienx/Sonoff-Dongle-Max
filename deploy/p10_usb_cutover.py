@@ -115,7 +115,7 @@ def discover(bundle:Path,selected:str|None=None,expected_revision:int=EXPECTED_R
         if selected and (result.get('verified_target_by_id')!=selected or
                          result.get('znp_p10_verified') is not True or
                          result.get('revision')!=expected_revision or result.get('product')!=1):
-            raise RuntimeError('Selected USB interface did not match previously measured P10 ZNP revision')
+            raise RuntimeError('Selected USB interface is not the previously measured P10 ZNP firmware revision')
         return result|{'addon_stopped':True,'network_restore_verified':False,
                        'sonoff_power_isolation_verified_by_software':False}
     finally:client.close()
