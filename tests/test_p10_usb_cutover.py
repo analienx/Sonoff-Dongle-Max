@@ -36,9 +36,10 @@ class UsbRendering(TestCase):
             self.assertNotIn(forbidden,subject.REMOTE)
 
     def test_source_requires_verified_cold_bundle(self):
-        with patch.object(subject,'verify',return_value={'cold_consistent':False,'integrity_pass':True}):
-            with self.assertRaisesRegex(RuntimeError,'COLD'):
-                subject.source_serial(Path('synthetic.zip'))
+        with patch.object(subject,'private_target',side_effect=lambda value:value):
+            with patch.object(subject,'verify',return_value={'cold_consistent':False,'integrity_pass':True}):
+                with self.assertRaisesRegex(RuntimeError,'COLD'):
+                    subject.source_serial(Path('synthetic.zip'))
 
 class UsbDiscovery(TestCase):
     @patch.object(subject,'source_serial',return_value=(OLD,{}, {},'/dev/serial/by-id/usb-SONOFF-example-if00'))
