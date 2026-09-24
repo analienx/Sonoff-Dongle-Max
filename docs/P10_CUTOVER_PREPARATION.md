@@ -1,64 +1,58 @@
 # MR4U P10: reusable cutover preparation (2026-09-24)
 
-This is executable **preparation**, not a command to migrate the live Zigbee network. Public Git contains only code, synthetic fixtures and sanitized findings. Keep the live archives, coordinators' IEEE addresses, database and network keys in the private Windows workspace / HA backup storage.
+**Start with the ordered [upstream-aligned cutover runbook](P10_UPSTREAM_CUTOVER_RUNBOOK.md) and `analienx/config:skills/zigbee-coordinator-migration/SKILL.md`.** This document explains existing scripts and real evidence. Neither the scripts nor offline tests have migrated or restored the existing Zigbee network. Do not publish actual radio IEEE addresses, private household device IDs, raw backup files or network keys.
 
-## Captured recovery state
+## Recovery artifacts already captured
 
-- Native full HA backup `sonoff-mr4u-precutover-20260924` (slug `edbb94f6`) created via `p10_native_ha_backup.py --create`. Supervisor confirms Home Assistant and Zigbee2MQTT add-on are present; ~2.20 GB. A previous separate full backup (2026-09-23) also exists. These are **not** tested HA restore operations.
-- `p10_cutover_prepare.py capture` read the running Z2M configuration, coordinator backup, device database and state cache over verified SSH/SFTP into a *new private directory*. It rechecks file length/mtime, saves per-file SHA256, and refuses overwrite; the live data-folder capture is **not atomic**, so repeat after Zigbee2MQTT has stopped at the actual cutover boundary.
-- Live database: **61 routers, 45 end devices, one coordinator, 21 groups**. Group records have `type=Group` and `groupID` instead of `ieeeAddr`; the previous device-only parser was corrected and regression-tested.
-- Exact source configuration is staged byte-for-byte as `rollback_configuration.yaml`; private acceptance baseline retains all device IDs and groups. The replacement configuration is deliberately NOT created until its actual P10 endpoint has been verified from HA.
+- OPTIONAL broad recovery point: Home Assistant full backup `sonoff-mr4u-precutover-20260924` (slug `edbb94f6`), ~2.20 GB, includes the Zigbee2MQTT add-on; a separate full backup dated September 23 also exists. The full HA backups were created and their metadata verified, but have **not** undergone restore testing. **Creating another full HA backup is NOT a cutover prerequisite.**
+- `p10_cutover_prepare.py capture` retrieved **only the named** `configuration.yaml`, `coordinator_backup.json`, `database.db`, `state.json` and any listed optional files via verified SSH/SFTP into private storage. It checks length/mtime and SHA-256 per file and refuses overwrite. It is **not an atomic or complete data-directory backup while Z2M is running**: custom converters/extensions, other local data and HA add-on options outside YAML might not be captured. A final **complete cold Zigbee2MQTT data-folder + add-on settings** snapshot must be taken after Z2M stops. The radio's original NVRAM/network state remains physically on the preserved SONOFF and is NOT exported by copying files.
+- Last private database inventory: 61 routers, 45 end devices, one coordinator, 21 groups. `type=Group` rows with `groupID` are supported by the corrected parser. Source config was staged byte-for-byte as `rollback_configuration.yaml`; baseline retained private device and group IDs.
+- The existing Ember backup has `devices=[]`; this can be expected by design and is not proof of lost Zigbee2MQTT device records. A device database or matching record count does not demonstrate complete Trust Center key restoration to a different stack.
 
-## Current radio connection: do not guess the port
+## Actual connection and radio isolation
 
-- Production HA Z2M uses `/dev/serial/by-id/...SONOFF...` with `serial.adapter=ember`, baud=115200; current network channel is 11. MR4U CC2674P10 responded on **Zephyrus COM4**, not a HA path.
-- MR4U's dual-radio LAN configuration uses separate sockets. Radio 2 CC26xx commonly uses port **7638**, but firmware, radio order and configured socket ports must be checked in this unit's own SMLIGHT Z2M/ZHA configuration generator. A Windows COM4 address is not a valid HA `serial.port`.
-- Once MR4U is independently connected to Ethernet/PoE and a private LAN IPv4/Radio 2 socket port is known, run from Zephyrus:
+- Production Z2M currently opens SONOFF over its HA `/dev/serial/by-id/...` USB path with `serial.adapter=ember` and 115200 baud. The replacement CC2674P10 answered on **Zephyrus COM4** at revision `20260310`, but a Windows COM port is not an HA TCP path.
+- Use the **actual MR4U unit's** SMLIGHT UI to identify the CC2674P10 *chip*, installed Z-Stack coordinator image, radio mode, LAN address and configured socket; labels and default port `7638` are not sufficient proof of which radio is exposed. Prefer wired Ethernet/PoE and a stable LAN address. Release any COM4/USB client before TCP access and ensure no other ZHA/Z2M/OTBR or MR4U hub process owns this Zigbee radio. Do not allow it to form the copied household network during connectivity checks.
+- `p10_target_endpoint.py` sends read-only ZNP SYS_PING/SYS_VERSION **from Home Assistant** to the chosen private LAN IPv4 and socket, comparing expected P10 firmware revision. It does **not** independently prove physical board identity, exclusive serial ownership, current network/security state or effective coordinator IEEE. After SMLIGHT LAN setup:
 
 ```text
-py -3 deploy/p10_target_endpoint.py --host <MR4U-LAN-IP> --port <RADIO2-PORT> --expected-revision 20260310
+py -3 deploy/p10_target_endpoint.py --host <MR4U-LAN-IP> --port <VERIFIED-P10-PORT> --expected-revision 20260310
 ```
 
-The command probes from **Home Assistant** using only ZNP SYS_PING/SYS_VERSION and refuses an unexpected radio/revision. If an active USB client owns the target radio, close that client before TCP probing. Never probe a production-network coordinator through this helper.
+- Source radio isolation is a **separate physical step** after Z2M stops: preserve the SONOFF's NVRAM, account for every USB/PoE/other power path, positively prevent its Zigbee radio transmitting, and prevent Z2M/add-on watchdogs or another process from reopening it. Do not run two coordinators with cloned identity/network state together. On rollback isolate the **P10 Zigbee radio** before reactivating SONOFF; the MR4U's independent Thread radio need not be switched off if its Zigbee radio is demonstrably isolated.
 
-## Private command sequence (examples; use fresh unique paths)
+## Private preparation scripts (not a live cutover)
 
 ```text
-# Verify the real full HA backup; default command is read-only:
+# OPTIONAL: inspect existing broad HA backup without creating another one:
 py -3 deploy/p10_native_ha_backup.py --name sonoff-mr4u-precutover-20260924
-# Capture current live Z2M files to a fresh private directory, no HA writes:
+# Provisional, named-file live snapshot; use fresh unique private paths:
 py -3 deploy/p10_cutover_prepare.py capture --out C:/Workspace/.analienx/sonoff-private/issues/p10/snapshots/UNIQUE
-# Check file integrity and device/group/backup records offline:
 py -3 deploy/p10_cutover_prepare.py inspect --source C:/Workspace/.analienx/sonoff-private/issues/p10/snapshots/UNIQUE
-# Stage the exact old configuration and rollback plan, no live changes:
+# Exact rollback YAML and proposed target YAML after endpoint verification only:
 py -3 deploy/p10_config_stage.py --snapshot C:/Workspace/.analienx/sonoff-private/issues/p10/snapshots/UNIQUE --out C:/Workspace/.analienx/sonoff-private/issues/p10/staged/UNIQUE --native-backup-slug edbb94f6
-# When actual HA-to-Radio2 TCP ZNP connectivity works, add --target-host and --target-port to the previous command, using a NEW output directory. This stages target_configuration.yaml ONLY after successful P10 revision verification.
-# Prepare a private complete device identity/group acceptance baseline:
+# Current private baseline of all device/group identities:
 py -3 deploy/p10_device_acceptance.py baseline --snapshot C:/Workspace/.analienx/sonoff-private/issues/p10/snapshots/UNIQUE --out C:/Workspace/.analienx/sonoff-private/issues/p10/acceptance/UNIQUE.json
 ```
 
-The config renderer changes **only the original two lines `serial.port` and `serial.adapter`**. It verifies the resulting YAML roundtrips and that all other parsed settings are unchanged. Its input retains the original configuration byte-for-byte in the private rollback staging area. The TCP endpoint must be probed from HA first; a hard-coded 7638 alone is not proof.
+For target YAML, add `--target-host` and `--target-port` to `p10_config_stage.py` **only after the HA-to-P10 TCP probe works**, using a NEW output directory. This renderer changes only the existing `serial.port` and `serial.adapter` lines; it does not write the coordinator IEEE, form a network or edit live HA. Review any HA add-on configuration/environment overrides outside YAML, serial flow control and target baud separately. Preserve old PAN/extended PAN, key and channel 11. Do not upgrade firmware or Z2M and migrate simultaneously.
 
-## Defined execution boundary (the preparation scripts do NOT execute these steps)
+## Maintenance-window operator sequence — scripts do NOT execute it
 
-1. Check latest full backup and an immediately pre-cutover Z2M cold snapshot after stopping the add-on. Record network identity, counters, group/device inventory and a route-error baseline. Do not commit any secret-bearing artifacts.
-2. Keep the SONOFF firmware/NV state intact and **physically isolate it before the new network is active**. Confirm the MR4U is in Zigbee coordinator mode and HA can reach the verified P10 socket. Do not run two coordinators with cloned identity/network security state.
-3. Verify transfer of the coordinator's actual IEEE, PAN/extended PAN, channel, network key and appropriate security counters; confirm the target Z-Stack restore path for the installed Zigbee2MQTT/zigbee-herdsman version. An Ember `devices=[]` backup can be expected by design; it is not evidence that individual link keys have been reconstructed or that the cross-stack restore is valid.
-4. After the target is prepared, deploy the staged target configuration through the approved HA mutation/deployment path and start Zigbee2MQTT once. Measure network startup and normal device operation instead of trusting retained database records.
-5. If acceptance fails, stop Zigbee2MQTT and isolate the MR4U before reconnecting the preserved SONOFF. Restore the exact old configuration and, only when needed, its matching old application data from the preserved backup. Check security counter/rejoin behavior: an old backup is not a guarantee of instant recovery.
+1. Freeze unrelated changes and record cutover timestamp, current source network identity and representative unicast/groupcast/metering/automation and route-error baseline.
+2. Stop Z2M and verify the add-on is stopped, cannot auto-restart and has released SONOFF. Take the **final complete cold** Z2M data directory and add-on settings copy; verify private hashes and keep the old radio's stored state intact. Current `p10_cutover_prepare.py` needs expansion or an independent complete-directory backup operation; it cannot by itself satisfy this step.
+3. Physically isolate the old SONOFF radio; then restore the **existing** Zigbee network state to the verified MR4U P10. Copy and verify the *effective* coordinator IEEE using an appropriate supported P10 procedure (factory-primary vs configurable-secondary IEEE matters), PAN ID, extended PAN ID, channel, network key, key sequence/counters and Trust Center behavior. Zigbee2MQTT says Ember↔Z-Stack cross-stack migrations are **not officially supported** and may need targeted re-pairing; a successful boot alone does not establish network compatibility. Do not delete original `coordinator_backup.json` or `database.db` to suppress a mismatch error.
+4. Deploy the minimal staged target YAML via `analienx/config:skills/home-assistant-local-executor/SKILL.md` and its deterministic mutation safety rules, start exactly one Z2M client on the P10, confirm logs say existing network restored rather than newly formed, and verify active IEEE and identity.
+5. Observe newly reporting devices against the private baseline and separately test real bidirectional commands, groups, metering, essential HA automations, security rejoins, a controlled test pairing, missing-router diagnostics and route/source-route trends. Zigbee mesh routing may settle over minutes or hours; avoid repetitive whole-mesh scans. Sleepy/end devices and intentionally relay-off bulbs need independent observation windows.
+6. KEEP the P10 only if agreed critical checks pass. Otherwise stop Z2M, isolate MR4U Zigbee radio, restore exact old config and only any corresponding old application files actually needed, reactivate intact SONOFF, restart Z2M once and check communication. Frame-counter and rejoin behavior may make rollback less immediate; do not blindly flash stale radio-state backups or run two cloned networks simultaneously. Record any targeted re-pairs because they affect reversibility.
+7. Capture a new backup on the coordinator ultimately kept, plus a narrow Z2M data snapshot and measured acceptance results. Existing 61 routers in the mesh and 400 provisioned P10 TCLK slots are NOT proof of a 60-entry direct-neighbor allocation.
 
-## Device recovery and network acceptance
-
-At cutover, record an exact timezone-aware timestamp. Capture a second Z2M data folder after devices have had an opportunity to report (do NOT start another cloned Zigbee network). Compare with the PRIVATE baseline:
+## Existing acceptance helper and test scope
 
 ```text
 py -3 deploy/p10_device_acceptance.py compare --baseline C:/Workspace/.analienx/sonoff-private/issues/p10/acceptance/UNIQUE.json --post-snapshot C:/Workspace/.analienx/sonoff-private/issues/p10/snapshots/POST_UNIQUE --cutover-utc 2026-09-24T12:00:00+02:00 --out C:/Workspace/.analienx/sonoff-private/issues/p10/acceptance/POST_UNIQUE.json
 ```
 
-This reports router/end-device recovery, identity disappearance, changed roles and group loss. It compares `lastSeen` in milliseconds to the cutover timestamp: simply remaining in `database.db` is NOT counted as a recovered device. The private report retains IDs for targeted recovery; console output contains aggregate counts only. Intentionally relay-powered-off bulbs and sleepy devices need explicit observation windows; they are not automatically classified as broken.
+The command reports private device/group retention and `lastSeen` since cutover, **not** bidirectional traffic or group delivery. `p10_neighbor_capacity.py` and `p10_capacity_gate.py` are separate limited-evidence diagnostics; use TI-specific `bridge/request/coordinator_check` (only if supported) to diagnose missing routers, not to infer the maximum table allocation. Our synthetic protocol and config tests do not prove a cross-stack restore or rollback.
 
-**Separate, mandatory live acceptance:** bidirectional unicast/poll or real application reports from all feasible routers; configured groups; representative power-monitoring/socket/dimmer commands; route failures measured against baseline; stable neighbor/LQI pages; parent/rejoin behavior over a sustained window. The lastSeen script does not claim these live measurements have already passed. See `p10_capacity_gate.py` and `p10_neighbor_capacity.py` for the independent capacity/operation evidence gate.
-
-## Validation scope
-
-The protocol-side TCP probe has an offline fake-radio socket test that verifies its exact SYS_PING/SYS_VERSION byte sequence and decoding. Snapshot/cutover staging, config-only modification, parser Group support and acceptance report have synthetic tests. Real hardware coverage: live SFTP snapshot and SHA256 reinspection; real native full HA backup via reusable helper; original COM4 P10 diagnostic and 400 TCLK records. **No production Zigbee cutover, real TCP Radio 2 test, IEEE write, cross-stack restore or rollback has been executed here.**
+**Evidence to date:** real confidential SFTP snapshot, original rollback YAML/hash, optional real HA backup, MR4U P10 USB identification/400 TCLK NV-length slots; fake TCP radio and snapshot/parser/staging tests. No actual HA-to-MR4U TCP endpoint probe, source IEEE transfer, completed cold full Z2M data copy, cross-stack restore, SONOFF isolation, live cutover or rollback has been performed.
