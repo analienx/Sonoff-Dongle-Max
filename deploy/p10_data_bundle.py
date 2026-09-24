@@ -27,6 +27,7 @@ MAX_TOTAL_BYTES = 512 * 1024 * 1024
 CHUNK = 1024 * 1024
 MANIFEST_NAME = 'meta/manifest.private.json'
 OPTIONS_NAME = 'meta/addon_options.private.json'
+SYMLINKS_NAME = 'meta/external_symlinks.private.json'
 
 
 def sha(raw: bytes) -> str:
@@ -61,8 +62,9 @@ def find_data_root(sftp) -> str:
     raise RuntimeError('Unable to identify complete Zigbee2MQTT data folder')
 
 
-def walk(sftp, root: str) -> list[tuple[str, str, object]]:
+def walk(sftp, root: str) -> tuple[list[tuple[str, str, object]], list[dict]]:
     files: list[tuple[str, str, object]] = []
+    links: list[dict] = []
     queue = [('', root)]
     total = 0
     while queue:
@@ -74,7 +76,13 @@ def walk(sftp, root: str) -> list[tuple[str, str, object]]:
             rel = prefix + name
             mode = entry.st_mode
             if stat.S_ISLNK(mode):
-                raise ValueError('Refusing symlink in application data: ' + rel)
+                target = sftp.readlink(absolute + '/' + name)
+                if not isinstance(target, str) or len(target) > 2048 or '\x00' in target:
+                    raise ValueError('Unexpected symbolic link target: ' + rel)
+                links.append({'path': rel, 'target': target})
+                if len(links) > 128:
+                    raise ValueError('Unexpected number of external dependencies')
+                continue
             if not prefix and name in SKIP_TOPLEVEL:
                 if not stat.S_ISDIR(mode):
                     raise ValueError('Log exclusion unexpectedly refers to a file')
@@ -92,7 +100,7 @@ def walk(sftp, root: str) -> list[tuple[str, str, object]]:
                 raise ValueError('Application data exceeds bounded capture limits')
     if not REQUIRED <= {rel for rel, _, _ in files}:
         raise RuntimeError('Missing Zigbee2MQTT recovery file')
-    return sorted(files, key=lambda row: row[0])
+    return sorted(files, key=lambda row: row[0]), sorted(links, key=lambda row: row['path'])
 
 
 def _read_to_archive(sftp, absolute: str, original, zipout, arcname: str) -> dict:
@@ -147,8 +155,10 @@ def verify(path: Path) -> dict:
         blobs = {n: archive.read('data/' + n) for n in REQUIRED}
         preflight(blobs)  # Reject malformed device database/backup, without requiring cross-stack success.
         return {'integrity_pass': True, 'mode': manifest['mode'],
-                'cold_consistent': manifest['mode'] == 'cold',
-                'application_file_count': len(files) - 1,
+                'cold_consistent': manifest['mode'] == 'cold' and manifest.get('app_stopped_throughout_capture') is True,
+                'application_file_count': sum(n.startswith('data/') for n in files),
+                'symlink_dependencies_present': bool(manifest.get('symlink_count', 0)),
+                'symlink_count': manifest.get('symlink_count', 0),
                 'total_application_bytes': sum(v['bytes'] for n, v in files.items() if n.startswith('data/')),
                 'addon_options_included': True, 'excluded_top_level_log_folders': sorted(SKIP_TOPLEVEL),
                 'network_migration_performed': False}
@@ -165,7 +175,7 @@ def capture(out: Path, mode: str) -> dict:
             raise RuntimeError('Cold capture requires the Zigbee2MQTT add-on to be stopped first')
         sftp = client.open_sftp()
         root = find_data_root(sftp)
-        files = walk(sftp, root)
+        files, links = walk(sftp, root)
         out.parent.mkdir(parents=True, exist_ok=True)
         records = {}
         options = json.dumps({'addon_slug': ADDON, 'options': info['options'],
@@ -178,14 +188,19 @@ def capture(out: Path, mode: str) -> dict:
                 records[name] = _read_to_archive(sftp, remote_path, entry, archive, name)
             archive.writestr(OPTIONS_NAME, options)
             records[OPTIONS_NAME] = {'bytes': len(options), 'sha256': sha(options)}
+            if links:
+                linkdata = json.dumps(links, sort_keys=True).encode()
+                archive.writestr(SYMLINKS_NAME, linkdata)
+                records[SYMLINKS_NAME] = {'bytes': len(linkdata), 'sha256': sha(linkdata)}
             if mode == 'cold' and addon_info(client).get('state') != 'stopped':
                 raise RuntimeError('Add-on restarted during cold capture: reject this bundle')
             manifest = {'format': 'p10-z2m-data-bundle-v1', 'mode': mode,
                         'captured_utc': datetime.now(timezone.utc).isoformat(),
                         'source_addon_state': info['state'], 'files': records,
                         'excluded_top_level_log_folders': sorted(SKIP_TOPLEVEL),
+                        'symlink_count': len(links),
                         'addon_environment_overrides_independently_verified': False,
-                        'atomic_capture_guaranteed': mode == 'cold'}
+                        'app_stopped_throughout_capture': mode == 'cold'}
             archive.writestr(MANIFEST_NAME, json.dumps(manifest, sort_keys=True))
         checked = verify(out)
         return checked | {'private_bundle_created': True, 'private_bundle_path': str(out)}
