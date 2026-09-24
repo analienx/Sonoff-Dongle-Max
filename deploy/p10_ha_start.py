@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 
 from p10_data_bundle import addon_info, load_ha
+from p10_ha_state import addon_quiescent
 from p10_ha_apply import PHRASES, live_plan, ADDON
 
 START_PHRASES={'target':'START_MR4U_AFTER_SONOFF_ISOLATION',
@@ -39,8 +40,7 @@ def start(stage:Path,phase:str,approval:str,ack:list[str]) -> dict:
         raise RuntimeError('Current add-on or config does not match the staged coordinator')
     client=load_ha()
     try:
-        if addon_info(client).get('state')!='stopped':
-            raise RuntimeError('Zigbee2MQTT state changed before start')
+        addon_quiescent(client)  # Accept crashed error state only with exited container.
         _,out,_=client.exec_command('ha apps start '+ADDON+' --no-progress --raw-json',timeout=None)
         out.channel.settimeout(None)
         raw=out.read().decode('utf-8',errors='replace')
