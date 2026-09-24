@@ -16,6 +16,7 @@ import sys
 
 from p10_cutover_prepare import private_target, REMOTE_ROOTS
 from p10_data_bundle import addon_info, load_ha
+from p10_ha_state import addon_quiescent
 
 ADDON = '45df7312_zigbee2mqtt'
 PHRASES = {'target': 'APPLY_MR4U_ONLY_AFTER_SONOFF_ISOLATION',
@@ -24,7 +25,7 @@ PHRASES = {'target': 'APPLY_MR4U_ONLY_AFTER_SONOFF_ISOLATION',
 # Executed on the authorized HA host only after local safety checks. Payload
 # enters over SSH stdin: no credentials, network keys or YAML in argv or logs.
 REMOTE_APPLY = r'''
-import base64, hashlib, json, os, pathlib, stat, sys, urllib.request, uuid
+import base64, hashlib, json, os, pathlib, stat, sys, urllib.request, uuid, subprocess
 p=json.load(sys.stdin)
 slug='45df7312_zigbee2mqtt'
 root=pathlib.Path(p['root'])
@@ -53,9 +54,15 @@ def request(method, suffix, data=None):
   raise RuntimeError('Supervisor rejected add-on options operation')
  return body.get('data')
 
-info=request('GET','/info')
-if info.get('state')!='stopped':
- raise RuntimeError('Zigbee2MQTT must remain stopped')
+def quiescent():
+ info=request('GET','/info')
+ if info.get('state') not in ('stopped','error'):
+  raise RuntimeError('Zigbee2MQTT Supervisor state is not quiescent')
+ check=subprocess.run(['docker','inspect','--format','{{.State.Running}}','app_'+slug],capture_output=True,text=True,timeout=15)
+ if check.returncode!=0 or check.stdout.strip()!='false':
+  raise RuntimeError('Zigbee2MQTT container must be verified not running')
+ return info
+info=quiescent()
 if info.get('options')!=p['expected_options']:
  raise RuntimeError('Live add-on options changed since staging')
 # Two-layer update: write candidate first, configure Supervisor second, and
@@ -74,7 +81,7 @@ try:
   raise RuntimeError('Staged remote YAML did not match proposed checksum')
  request('POST','/options',{'options':p['new_options']})
  updated_options=True
- if cfg.read_bytes()!=old_bytes or request('GET','/info').get('state')!='stopped':
+ if cfg.read_bytes()!=old_bytes or quiescent().get('state') not in ('stopped','error'):
   raise RuntimeError('Source changed while staging; returning old options')
  os.replace(str(tmp),str(cfg))
  updated_options=False
@@ -82,8 +89,8 @@ finally:
  if tmp.exists(): tmp.unlink()
  if updated_options:
   request('POST','/options',{'options':p['expected_options']})
-current=request('GET','/info')
-if current.get('state')!='stopped' or current.get('options')!=p['new_options'] or sha(cfg.read_bytes())!=p['new_yaml_sha256']:
+current=quiescent()
+if current.get('options')!=p['new_options'] or sha(cfg.read_bytes())!=p['new_yaml_sha256']:
  raise RuntimeError('Post-apply mismatch; keep Zigbee2MQTT stopped')
 print(json.dumps({'two_layer_config_applied':True,'addon_remains_stopped':True,
                   'yaml_sha256':p['new_yaml_sha256'],'radio_touched':False}))
@@ -126,6 +133,7 @@ def live_plan(directory: Path, phase: str) -> dict:
     client = load_ha()
     try:
         info = addon_info(client)
+        quiet = addon_quiescent(client, info)
         sftp = client.open_sftp()
         roots, inconsistent = [], False
         for root in REMOTE_ROOTS:
@@ -142,7 +150,8 @@ def live_plan(directory: Path, phase: str) -> dict:
                 'expected_yaml_present':unique_match,
                 'addon_options_match_expected':info['options']==material['expected_options'],
                 'data_root':roots[0] if unique_match else None,
-                'safe_to_apply_config': info['state']=='stopped' and unique_match and
+                'addon_container_running': quiet['addon_container_running'],
+                'safe_to_apply_config': quiet['addon_quiescent'] and unique_match and
                        info['options']==material['expected_options'],
                 'radio_isolation_verified_by_software':False, 'live_change_performed':False}
     finally:

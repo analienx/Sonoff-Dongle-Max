@@ -46,7 +46,7 @@ class UsbDiscovery(TestCase):
     @patch.object(subject,'load_ha')
     @patch.object(subject,'addon_info',return_value={'state':'started'})
     def test_refuses_while_addon_runs(self,_info,connection,_source):
-        with self.assertRaisesRegex(RuntimeError,'STOPPED'):
+        with self.assertRaisesRegex(RuntimeError,'not stopped or error'):
             subject.discover(Path('synthetic.zip'),TARGET)
         connection.return_value.exec_command.assert_not_called()
 
@@ -60,12 +60,14 @@ class UsbDiscovery(TestCase):
             'revision':12345678}).encode()
         stream.channel.recv_exit_status.return_value=0
         client.exec_command.return_value=(None,stream,None)
-        with self.assertRaisesRegex(RuntimeError,'not the previously measured'):
-            subject.discover(Path('synthetic.zip'),TARGET)
+        with patch.object(subject,'addon_quiescent',return_value={'addon_quiescent':True}):
+            with self.assertRaisesRegex(RuntimeError,'not the previously measured'):
+                subject.discover(Path('synthetic.zip'),TARGET)
         stream.read.return_value=json.dumps({'source_usb_absent':True,
             'verified_target_by_id':TARGET,'znp_p10_verified':True,'product':1,
             'revision':subject.EXPECTED_REVISION}).encode()
-        self.assertTrue(subject.discover(Path('synthetic.zip'),TARGET)['znp_p10_verified'])
+        with patch.object(subject,'addon_quiescent',return_value={'addon_quiescent':True}):
+            self.assertTrue(subject.discover(Path('synthetic.zip'),TARGET)['znp_p10_verified'])
 
     def test_rejects_invalid_user_supplied_port_before_remote_access(self):
         with patch.object(subject,'source_serial',return_value=(OLD,{}, {},'/dev/serial/by-id/usb-S')):

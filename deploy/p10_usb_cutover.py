@@ -16,6 +16,7 @@ import zipfile
 import yaml
 from p10_cutover_prepare import private_target
 from p10_data_bundle import verify,load_ha,addon_info,OPTIONS_NAME
+from p10_ha_state import addon_quiescent
 from p10_migration_workflow import stage as stage_source,_write
 
 EXPECTED_REVISION=20260310  # Revision measured on the selected idle P10; NOT an IEEE/network proof.
@@ -101,8 +102,7 @@ def discover(bundle:Path,selected:str|None=None,expected_revision:int=EXPECTED_R
         raise ValueError('Select an exact HA USB by-id path; never COM4 or ttyACM0')
     client=load_ha()
     try:
-        if addon_info(client).get('state')!='stopped':
-            raise RuntimeError('Zigbee2MQTT must remain STOPPED during USB target identification')
+        quiescence=addon_quiescent(client, addon_info(client))  # Error allowed only with exited Docker container.
         cmd='python3 -c '+shlex.quote(REMOTE)+' '+shlex.quote(source)
         if selected:cmd+=' '+shlex.quote(selected)
         _,stdout,_=client.exec_command(cmd,timeout=22)
@@ -116,7 +116,7 @@ def discover(bundle:Path,selected:str|None=None,expected_revision:int=EXPECTED_R
                          result.get('znp_p10_verified') is not True or
                          result.get('revision')!=expected_revision or result.get('product')!=1):
             raise RuntimeError('Selected USB interface is not the previously measured P10 ZNP firmware revision')
-        return result|{'addon_stopped':True,'network_restore_verified':False,
+        return result|quiescence|{'addon_stopped':True,'network_restore_verified':False,
                        'sonoff_power_isolation_verified_by_software':False}
     finally:client.close()
 
