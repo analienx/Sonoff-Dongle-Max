@@ -22,19 +22,25 @@ def digest(data: bytes) -> str:
 
 
 def inventory(data: bytes) -> dict:
-    found, kinds = set(), {key: 0 for key in ROLES}
+    found, groups, kinds = set(), set(), {key: 0 for key in ROLES}
     for raw in data.splitlines():
         if not raw.strip():
             continue
         record = json.loads(raw)
         role = record.get('type')
+        if role == 'Group':
+            group_id = record.get('groupID')
+            if type(group_id) is not int or not 0 <= group_id <= 65535 or group_id in groups:
+                raise ValueError('Invalid or duplicate Zigbee2MQTT group record')
+            groups.add(group_id)
+            continue
         ieee = record.get('ieeeAddr')
         if role not in ROLES or not isinstance(ieee, str) or ieee.lower() in found:
             raise ValueError('Invalid or duplicate Zigbee2MQTT device record')
         found.add(ieee.lower()); kinds[role] += 1
     if kinds['Coordinator'] != 1:
         raise ValueError('Expected exactly one coordinator in database')
-    return {'records': len(found), 'roles': kinds}
+    return {'records': len(found), 'roles': kinds, 'groups': len(groups)}
 
 
 def preflight(blobs: dict[str, bytes]) -> dict:

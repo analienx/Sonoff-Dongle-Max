@@ -55,6 +55,17 @@ class BackupTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 subject.archive(root, dest)
 
+    def test_live_z2m_group_records_are_not_device_duplicates(self):
+        data = sample()
+        groups = [json.dumps({'id': i + 10, 'type': 'Group', 'groupID': i + 100, 'members': [], 'meta': {}}).encode() for i in range(21)]
+        data['database.db'] += b'\n' + b'\n'.join(groups)
+        report = subject.preflight(data)
+        self.assertEqual(report['database']['records'], 3)
+        self.assertEqual(report['database']['groups'], 21)
+        with self.assertRaises(ValueError):
+            subject.preflight({**data, 'database.db': data['database.db'] + b'\n' + groups[0]})
+
+
 
 if __name__ == '__main__':
     unittest.main()
