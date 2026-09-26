@@ -4,7 +4,7 @@ Dedicated firmware, build, deployment, rollback and acceptance tooling for the S
 
 The current production experiment is **P009**: an EmberZNet 9.1.1 / EZSP 19 NCP build that preserves the existing large-network profile while increasing broadcast-table headroom from 30 to 64 entries and the key table from 1 to 12.
 
-## Safety invariants
+## P009 firmware-upgrade safety invariants
 
 - Never clear NVM or factory-reset the coordinator.
 - Preserve coordinator IEEE, PAN ID, extended PAN ID, channel and network key.
@@ -15,6 +15,15 @@ The current production experiment is **P009**: an EmberZNet 9.1.1 / EZSP 19 NCP 
 - Run only the bounded acceptance gate; no soak or parameter matrix.
 
 See `docs/EXECUTOR-DEPLOY.md` and the active GitHub issue before deploying.
+
+## Fresh P10 network rebuild/reconciliation
+
+For a deliberate clean MR4U P10 network rebuild, use the versioned
+`deploy/p10_rebuild_reconciler.py` helper and
+[`docs/P10_FRESH_NETWORK_REBUILD.md`](docs/P10_FRESH_NETWORK_REBUILD.md).
+It snapshots/restores Zigbee2MQTT application state by IEEE address (names,
+groups, bindings and device options) without copying Zigbee network/security
+state into the new network.
 
 ## Canonical Home Assistant diagnostics and Zigbee device identification
 
