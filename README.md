@@ -23,7 +23,9 @@ For a deliberate clean MR4U P10 network rebuild, use the versioned
 [`docs/P10_FRESH_NETWORK_REBUILD.md`](docs/P10_FRESH_NETWORK_REBUILD.md).
 It snapshots/restores Zigbee2MQTT application state by IEEE address (names,
 groups, bindings and device options) without copying Zigbee network/security
-state into the new network.
+state into the new network. Version 0.2 fails closed unless independent evidence
+proves the P10 device/security tables were sanitized; standard recommissioning
+alone was observed to leave stale CC2674P10 address-manager entries.
 
 ## Canonical Home Assistant diagnostics and Zigbee device identification
 

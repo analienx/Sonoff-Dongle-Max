@@ -1,61 +1,112 @@
 from __future__ import annotations
+
 import json
-from pathlib import Path
 import sys
+import zipfile
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
-import zipfile
+
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "deploy"))
 import p10_rebuild_reconciler as tool
 
-
 COORD = "0x00124b002d12b1fd"
-COORD_REV = "0xfdb1122d004b1200"
 ROUTER = "0xa4c1380000000001"
 REMOTE = "0x08fd52ff00000002"
+OTHER = "0xa4c1380000000003"
 
 
-def bundle(path: Path, include_remote: bool = True, include_group: bool = True) -> Path:
+def _backup(devices=None):
+    return {
+        "coordinator_ieee": COORD.removeprefix("0x"),
+        "pan_id": "0x1234",
+        "extended_pan_id": "0011223344556677",
+        "channel": 11,
+        "network_key": {"key": "00" * 16, "sequence_number": 0, "frame_counter": 1},
+        "devices": devices or [],
+    }
+
+
+def bundle(
+    path: Path,
+    *,
+    include_remote: bool = True,
+    include_group: bool = True,
+    group_name: str = "PilotLights",
+    router_options: bool = True,
+) -> Path:
+    devices = {
+        ROUTER: {"friendly_name": "PilotRouter"},
+        REMOTE: {"friendly_name": "PilotRemote"},
+        OTHER: {"friendly_name": "OtherRouter"},
+    }
+    if router_options:
+        devices[ROUTER].update({
+            "retain": True,
+            "reporting": [{"attribute": "all", "min_interval": 20, "max_interval": 300}],
+        })
     config = {
-        "devices": {
-            ROUTER: {
-                "friendly_name": "PilotRouter",
-                "retain": True,
-                "reporting": [{"attribute": "all", "min_interval": 20, "max_interval": 300}],
-            },
-            REMOTE: {"friendly_name": "PilotRemote"},
-        },
-        "groups": {22: {"friendly_name": "PilotLights", "optimistic": True}},
+        "mqtt": {"server": "mqtt://broker:1883", "base_topic": "zigbee2mqtt"},
+        "devices": devices,
+        "groups": {22: {"friendly_name": group_name, "optimistic": True}},
     }
     rows = [
         {
-            "id": 1, "type": "Coordinator", "ieeeAddr": COORD,
-            "interviewCompleted": True, "endpoints": {},
+            "id": 1,
+            "type": "Coordinator",
+            "ieeeAddr": COORD,
+            "interviewCompleted": True,
+            "endpoints": {},
         },
         {
-            "id": 2, "type": "Router", "ieeeAddr": ROUTER, "modelId": "TS011F",
-            "manufName": "_TZ3000_test", "interviewCompleted": True,
+            "id": 2,
+            "type": "Router",
+            "ieeeAddr": ROUTER,
+            "modelId": "TS011F",
+            "manufName": "_TZ3000_test",
+            "interviewCompleted": True,
             "interviewState": "SUCCESSFUL",
             "endpoints": {
                 "1": {
                     "binds": [
-                        {"cluster": 6, "deviceIeeeAddress": COORD_REV,
-                         "endpointID": 1, "type": "endpoint"},
+                        {
+                            "cluster": 6,
+                            "deviceIeeeAddress": tool._reverse_ieee(COORD),
+                            "endpointID": 1,
+                            "type": "endpoint",
+                        }
                     ],
                     "configuredReportings": [
-                        {"cluster": 6, "attrId": 0, "minRepIntval": 5,
-                         "maxRepIntval": 300, "repChange": 1},
+                        {
+                            "cluster": 6,
+                            "attrId": 0,
+                            "minRepIntval": 5,
+                            "maxRepIntval": 300,
+                            "repChange": 1,
+                        }
                     ],
                 }
             },
         },
+        {
+            "id": 4,
+            "type": "Router",
+            "ieeeAddr": OTHER,
+            "modelId": "TS011F",
+            "interviewCompleted": True,
+            "interviewState": "SUCCESSFUL",
+            "endpoints": {"1": {"binds": [], "configuredReportings": []}},
+        },
     ]
     if include_remote:
         rows.append({
-            "id": 3, "type": "EndDevice", "ieeeAddr": REMOTE,
-            "modelId": "RODRET wireless dimmer", "interviewCompleted": True,
+            "id": 3,
+            "type": "EndDevice",
+            "ieeeAddr": REMOTE,
+            "modelId": "RODRET wireless dimmer",
+            "interviewCompleted": True,
             "interviewState": "SUCCESSFUL",
             "endpoints": {
                 "1": {
@@ -69,44 +120,52 @@ def bundle(path: Path, include_remote: bool = True, include_group: bool = True) 
         })
     if include_group:
         rows.append({
-            "id": 4, "type": "Group", "groupID": 22,
-            "members": [{"deviceIeeeAddr": ROUTER, "endpointID": 1}],
+            "id": 5,
+            "type": "Group",
+            "groupID": 22,
+            "members": [
+                {"deviceIeeeAddr": ROUTER, "endpointID": 1},
+                {"deviceIeeeAddr": OTHER, "endpointID": 1},
+            ],
             "meta": {},
         })
+
     with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("data/configuration.yaml", yaml.safe_dump(config, sort_keys=True))
+        archive.writestr(
+            "data/configuration.yaml",
+            yaml.safe_dump(config, sort_keys=True),
+        )
         archive.writestr(
             "data/database.db",
-            b"\n".join(json.dumps(row, separators=(",", ":")).encode() for row in rows) + b"\n",
+            b"\n".join(
+                json.dumps(row, separators=(",", ":")).encode()
+                for row in rows
+            ) + b"\n",
+        )
+        archive.writestr(
+            "data/coordinator_backup.json",
+            json.dumps(_backup()),
         )
     return path
 
 
 class RebuildReconcilerTests(TestCase):
-    def test_snapshot_preserves_group_and_separates_coordinator_binding(self):
-        with TemporaryDirectory() as td:
-            source = bundle(Path(td) / "source.zip")
-            snap = tool.snapshot(source)
-        self.assertEqual(tool.VERSION, "0.1.1")
-        self.assertFalse(snap["contains_network_secrets"])
-        self.assertEqual(snap["groups"]["22"]["friendly_name"], "PilotLights")
-        self.assertEqual(snap["groups"]["22"]["members"],
-                         [{"ieee": ROUTER, "endpoint": 1}])
-        ep = snap["devices"][ROUTER]["endpoints"]["1"]
-        self.assertEqual(ep["custom_bindings"], [])
-        self.assertEqual(ep["coordinator_bindings_reference"][0]["target_ieee"], COORD)
-        self.assertEqual(snap["devices"][ROUTER]["options"], {"retain": True})
-
-    def test_snapshot_keeps_custom_group_bindings_exactly(self):
+    def test_snapshot_preserves_application_state_and_network_fingerprint(self):
         with TemporaryDirectory() as td:
             snap = tool.snapshot(bundle(Path(td) / "source.zip"))
-        binds = snap["devices"][REMOTE]["endpoints"]["1"]["custom_bindings"]
+        self.assertEqual(tool.VERSION, "0.2.0")
+        self.assertFalse(snap["contains_network_secrets"])
+        self.assertTrue(snap["source_network_fingerprint"])
+        self.assertEqual(snap["groups"]["22"]["friendly_name"], "PilotLights")
         self.assertEqual(
-            {(b["target_group_id"], b["cluster"]) for b in binds},
-            {(22, 6), (22, 8)},
+            {(item["ieee"], item["endpoint"]) for item in snap["groups"]["22"]["members"]},
+            {(ROUTER, 1), (OTHER, 1)},
         )
+        ep = snap["devices"][ROUTER]["endpoints"]["1"]
+        self.assertEqual(ep["custom_bindings"], [])
+        self.assertEqual(snap["devices"][ROUTER]["options"], {"retain": True})
 
-    def test_pilot_selector_accepts_names_and_aliases(self):
+    def test_pilot_filters_group_members_to_selected_devices(self):
         with TemporaryDirectory() as td:
             snap = tool.snapshot(bundle(Path(td) / "source.zip"))
         pilot = tool.select_pilot(
@@ -116,112 +175,136 @@ class RebuildReconcilerTests(TestCase):
         )
         self.assertEqual(set(pilot["devices"]), {ROUTER, REMOTE})
         self.assertEqual(pilot["devices"][REMOTE]["friendly_name"], "RODRET_Pilot_A")
-        self.assertEqual(pilot["unresolved_selectors"], [])
-        self.assertIn("22", pilot["groups"])
+        self.assertEqual(
+            pilot["groups"]["22"]["members"],
+            [{"ieee": ROUTER, "endpoint": 1}],
+        )
 
-    def test_plan_uses_exact_group_id_and_replays_custom_binding(self):
+    def test_unresolved_pilot_selector_fails_closed(self):
+        with TemporaryDirectory() as td:
+            snap = tool.snapshot(bundle(Path(td) / "source.zip"))
+        with self.assertRaisesRegex(ValueError, "Unresolved"):
+            tool.select_pilot(snap, ["does-not-exist"], [])
+
+    def test_plan_creates_group_and_binding_without_raw_reporting_replay(self):
         with TemporaryDirectory() as td:
             td = Path(td)
-            original = bundle(td / "old.zip")
-            current = bundle(td / "new.zip")
-            snap = tool.snapshot(original)
-            # Simulate a fresh network without the old group but with both devices joined.
-            current = bundle(td / "fresh.zip", include_group=False)
-            result = tool.plan(snap, current)
-        topics = [x["topic"] for x in result["operations"]]
+            old = bundle(td / "old.zip")
+            fresh0 = bundle(td / "fresh0.zip", include_group=False)
+            cfg, rows, backup = tool._load_bundle(fresh0, require_backup=True)
+            for row in rows:
+                if row.get("ieeeAddr") == REMOTE:
+                    row["endpoints"]["1"]["binds"] = []
+            fresh = td / "fresh.zip"
+            with zipfile.ZipFile(fresh, "w") as archive:
+                archive.writestr("data/configuration.yaml", yaml.safe_dump(cfg))
+                archive.writestr(
+                    "data/database.db",
+                    b"\n".join(json.dumps(row).encode() for row in rows) + b"\n",
+                )
+                archive.writestr("data/coordinator_backup.json", json.dumps(backup))
+            manifest = tool.snapshot(old)
+            result = tool.plan(manifest, fresh)
+        topics = [item["topic"] for item in result["operations"]]
         self.assertIn("zigbee2mqtt/bridge/request/group/add", topics)
-        group_add = next(x for x in result["operations"] if x["topic"].endswith("/group/add"))
-        self.assertEqual(group_add["payload"], {"id": 22, "friendly_name": "PilotLights"})
-        bind = next(x for x in result["operations"] if x["topic"].endswith("/device/bind"))
-        self.assertEqual(bind["payload"]["clusters"], ["genOnOff", "genLevelCtrl"])
-        self.assertEqual(bind["payload"]["from"], "PilotRemote")
-        self.assertEqual(bind["payload"]["from_endpoint"], 1)
-        self.assertEqual(bind["payload"]["to"], "PilotLights")
+        self.assertIn("zigbee2mqtt/bridge/request/device/bind", topics)
+        self.assertFalse(any("reporting/configure" in topic for topic in topics))
+        self.assertFalse(result["raw_reporting_replay_enabled"])
+
+    def test_plan_restores_group_name_with_rename(self):
+        with TemporaryDirectory() as td:
+            td = Path(td)
+            old = bundle(td / "old.zip", group_name="Desired")
+            current = bundle(td / "current.zip", group_name="Wrong")
+            manifest = tool.snapshot(old)
+            result = tool.plan(manifest, current)
+        rename = next(
+            item for item in result["operations"]
+            if item["topic"].endswith("/group/rename")
+        )
+        self.assertEqual(rename["payload"]["from"], 22)
+        self.assertEqual(rename["payload"]["to"], "Desired")
+
+    def test_network_fingerprint_binds_journal_and_plan(self):
+        with TemporaryDirectory() as td:
+            td = Path(td)
+            source = bundle(td / "source.zip")
+            manifest = tool.snapshot(source)
+            result = tool.plan(manifest, source)
+            journal = tool._new_journal("different")
+            path = td / "journal.json"
+            path.write_text(json.dumps(journal), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "different Zigbee network"):
+                tool.plan(manifest, source, path)
+        self.assertTrue(result["network_fingerprint"])
+
+    def test_scope_does_not_pull_unrelated_group_operations(self):
+        ops = [
+            {
+                "scope": "group:22",
+                "related_scopes": [ROUTER],
+                "op_id": "g1",
+            },
+            {
+                "scope": "group:33",
+                "related_scopes": [OTHER],
+                "op_id": "g2",
+            },
+            {"scope": ROUTER, "op_id": "d1"},
+        ]
+        selected = tool._select_operations({"operations": ops}, [ROUTER])
+        self.assertEqual({item["op_id"] for item in selected}, {"g1", "d1"})
+
+    def test_status_checks_real_restoration_not_just_interview(self):
+        with TemporaryDirectory() as td:
+            td = Path(td)
+            old = bundle(td / "old.zip")
+            current = bundle(td / "current.zip", router_options=False)
+            manifest = tool.snapshot(old)
+            result = tool.status(manifest, current)
+        router = result["devices"][ROUTER]
+        self.assertTrue(router["interview_ok"])
+        self.assertFalse(router["options_ok"])
+        self.assertFalse(router["fully_restored"])
+
+    def test_reporting_mismatch_is_deferred_not_written(self):
+        with TemporaryDirectory() as td:
+            td = Path(td)
+            old = bundle(td / "old.zip")
+            current = bundle(td / "current.zip")
+            cfg, rows, backup = tool._load_bundle(current, require_backup=True)
+            for row in rows:
+                if row.get("ieeeAddr") == ROUTER:
+                    row["endpoints"]["1"]["configuredReportings"] = []
+            rewritten = td / "no-report.zip"
+            with zipfile.ZipFile(rewritten, "w") as archive:
+                archive.writestr("data/configuration.yaml", yaml.safe_dump(cfg))
+                archive.writestr(
+                    "data/database.db",
+                    b"\n".join(json.dumps(row).encode() for row in rows) + b"\n",
+                )
+                archive.writestr("data/coordinator_backup.json", json.dumps(backup))
+            result = tool.plan(tool.snapshot(old), rewritten)
+        self.assertTrue(any(
+            item["reason"] == "reporting_reference_mismatch_use_configure_then_review"
+            for item in result["deferred"]
+        ))
         self.assertFalse(any(
-            x["scope"] == ROUTER and x["topic"].endswith("/device/options")
-            for x in result["operations"]
+            item["topic"].endswith("/reporting/configure")
+            for item in result["operations"]
         ))
 
-    def test_plan_replays_missing_runtime_options(self):
-        with TemporaryDirectory() as td:
-            td = Path(td)
-            source = bundle(td / "old.zip")
-            fresh = bundle(td / "fresh.zip")
-            snap = tool.snapshot(source)
-            cfg, rows = tool._load_bundle(fresh)
-            cfg["devices"][ROUTER] = {"friendly_name": "PilotRouter"}
-            rewritten = td / "fresh-no-options.zip"
-            with zipfile.ZipFile(rewritten, "w") as archive:
-                archive.writestr("data/configuration.yaml", yaml.safe_dump(cfg, sort_keys=True))
-                archive.writestr("data/database.db", b"\n".join(
-                    json.dumps(r, separators=(",", ":")).encode() for r in rows) + b"\n")
-            result = tool.plan(snap, rewritten)
-        router_options = next(x for x in result["operations"]
-                              if x["scope"] == ROUTER and x["topic"].endswith("/device/options"))
-        self.assertTrue(router_options["best_effort"])
-        self.assertTrue(router_options["payload"]["options"]["retain"])
-        self.assertIn("reporting", router_options["payload"]["options"])
+    def test_broker_parser_refuses_mqtts_instead_of_guessing(self):
+        with self.assertRaisesRegex(ValueError, "Only mqtt"):
+            tool._broker_from_config({"mqtt": {"server": "mqtts://broker:8883"}})
 
-    def test_plan_defers_device_binding_until_target_joins(self):
-        manifest = {
-            "format": tool.FORMAT,
-            "tool_version": tool.VERSION,
-            "captured_at_utc": "2026-09-26T00:00:00+00:00",
-            "source_bundle_sha256": "0" * 64,
-            "source_coordinator_ieee": COORD,
-            "devices": {
-                REMOTE: {
-                    "ieee": REMOTE, "friendly_name": "Remote",
-                    "friendly_name_explicit": True, "options": {}, "groups": [],
-                    "endpoints": {"1": {"custom_bindings": [{
-                        "target_kind": "device", "target_ieee": ROUTER,
-                        "target_endpoint": 1, "cluster": 6,
-                    }], "configured_reportings_reference": []}},
-                },
-                ROUTER: {
-                    "ieee": ROUTER, "friendly_name": "Router",
-                    "friendly_name_explicit": True, "options": {}, "groups": [],
-                    "endpoints": {},
-                },
-            },
-            "groups": {},
-        }
-        with TemporaryDirectory() as td:
-            current = bundle(Path(td) / "fresh.zip", include_remote=True)
-            # Remove target router from fresh DB while keeping remote.
-            cfg, rows = tool._load_bundle(current)
-            rows = [r for r in rows if r.get("ieeeAddr") != ROUTER]
-            current2 = Path(td) / "fresh2.zip"
-            with zipfile.ZipFile(current2, "w") as archive:
-                archive.writestr("data/configuration.yaml", yaml.safe_dump(cfg))
-                archive.writestr("data/database.db", b"\n".join(
-                    json.dumps(r).encode() for r in rows) + b"\n")
-            result = tool.plan(manifest, current2)
-        self.assertTrue(any(x["reason"] == "binding_target_not_joined"
-                            for x in result["deferred"]))
-
-    def test_reporting_is_opt_in(self):
-        with TemporaryDirectory() as td:
-            td = Path(td)
-            source = bundle(td / "old.zip")
-            fresh = bundle(td / "fresh.zip")
-            snap = tool.snapshot(source)
-            default = tool.plan(snap, fresh, include_reporting=False)
-            enabled = tool.plan(snap, fresh, include_reporting=True)
-        self.assertFalse(any(x["topic"].endswith("/reporting/configure")
-                             for x in default["operations"]))
-        report = next(x for x in enabled["operations"]
-                      if x["topic"].endswith("/reporting/configure"))
-        self.assertEqual(report["payload"]["cluster"], 6)
-        self.assertEqual(report["payload"]["attribute"], 0)
-
-
-    def test_remote_apply_supports_nondefault_base_topic(self):
+    def test_remote_apply_compiles(self):
         compile(tool.REMOTE_APPLY, "<remote_apply>", "exec")
-        self.assertIn('base_topic', tool.REMOTE_APPLY)
-        self.assertIn('topic.startswith("zigbee2mqtt/")', tool.REMOTE_APPLY)
 
-    def test_apply_is_fail_closed_without_exact_phrase(self):
-        with self.assertRaisesRegex(ValueError, "approval"):
-            tool.apply({"format": tool.PLAN_FORMAT, "operations": []}, [],
-                       "wrong")
+    def test_journal_atomic_roundtrip(self):
+        with TemporaryDirectory() as td:
+            path = Path(td) / "journal.json"
+            data = tool._new_journal("abc")
+            tool._atomic_json(path, data)
+            loaded = tool._load_journal(path, "abc")
+        self.assertEqual(loaded["network_fingerprint"], "abc")

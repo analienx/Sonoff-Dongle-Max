@@ -1,12 +1,8 @@
 """Versioned Zigbee2MQTT fresh-network rebuild/reconciliation helper.
 
-Snapshots application-level Zigbee state needed to reconstruct a fresh network:
-IEEE identity, friendly names/options, exact group IDs/memberships,
-non-coordinator bindings and cached reporting metadata. Network keys/PAN/
-Trust-Center material are never copied into the manifest.
-
-Default commands are read-only. apply is separately gated and executes only an
-explicit JSON operation plan over Zigbee2MQTT's documented bridge MQTT API.
+The manifest is application state only. It never copies Zigbee network keys.
+Every executable plan is bound to a specific coordinator/PAN/extPAN/channel
+fingerprint and live execution requires a persistent per-operation journal.
 """
 from __future__ import annotations
 
@@ -14,22 +10,36 @@ import argparse
 import hashlib
 import importlib.util
 import json
-from pathlib import Path
+import os
 import sys
-from datetime import datetime, timezone
-from typing import Any
+import tempfile
 import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
 import yaml
 
-VERSION = "0.1.1"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from p10_rebuild_common import backup_network_fingerprint
+
+VERSION = "0.2.0"
 FORMAT = "p10-z2m-rebuild-manifest-v1"
-PLAN_FORMAT = "p10-z2m-rebuild-plan-v1"
+PLAN_FORMAT = "p10-z2m-rebuild-plan-v2"
+JOURNAL_FORMAT = "p10-z2m-rebuild-journal-v1"
 APPLY_APPROVAL = "APPLY_P10_REBUILD_RECONCILIATION"
 HELPER = Path("C:/Workspace/repos/config/skills/home-assistant-readonly/ha_readonly.py")
 ADDON = "45df7312_zigbee2mqtt"
 DEVICE_NON_OPTIONS = {"friendly_name", "reporting", "homeassistant"}
 GROUP_NON_OPTIONS = {"friendly_name"}
-BIND_CLUSTER_NAMES = {5: "genScenes", 6: "genOnOff", 8: "genLevelCtrl", 258: "closuresWindowCovering", 768: "lightingColorCtrl"}
+BIND_CLUSTER_NAMES = {
+    5: "genScenes",
+    6: "genOnOff",
+    8: "genLevelCtrl",
+    258: "closuresWindowCovering",
+    768: "lightingColorCtrl",
+}
 
 
 def _sha256(path: Path) -> str:
@@ -44,31 +54,46 @@ def _reverse_ieee(ieee: str) -> str:
     raw = ieee.lower().removeprefix("0x")
     if len(raw) != 16:
         return ieee.lower()
-    return "0x" + bytes.fromhex(raw)[::-1].hex()
+    try:
+        return "0x" + bytes.fromhex(raw)[::-1].hex()
+    except ValueError:
+        return ieee.lower()
 
 
-def _load_bundle(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _load_bundle(path: Path, require_backup: bool = False) -> tuple[dict, list[dict], dict | None]:
     if not path.is_file():
         raise FileNotFoundError(path)
     with zipfile.ZipFile(path) as archive:
+        names = set(archive.namelist())
         required = {"data/configuration.yaml", "data/database.db"}
-        if not required <= set(archive.namelist()):
+        if not required <= names:
             raise ValueError("Bundle is missing configuration.yaml or database.db")
         config = yaml.safe_load(archive.read("data/configuration.yaml")) or {}
-        rows = [json.loads(raw) for raw in archive.read("data/database.db").splitlines() if raw.strip()]
+        rows = [
+            json.loads(raw)
+            for raw in archive.read("data/database.db").splitlines()
+            if raw.strip()
+        ]
+        backup = None
+        if "data/coordinator_backup.json" in names:
+            backup = json.loads(archive.read("data/coordinator_backup.json"))
+        elif require_backup:
+            raise ValueError("Bundle is missing coordinator_backup.json")
     if not isinstance(config, dict):
-        raise ValueError("Zigbee2MQTT configuration is not a mapping")
-    return config, rows
+        raise TypeError("Zigbee2MQTT configuration is not a mapping")
+    if backup is not None and not isinstance(backup, dict):
+        raise TypeError("Coordinator backup is not a mapping")
+    return config, rows, backup
 
 
 def _config_devices(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     raw = config.get("devices") or {}
     if not isinstance(raw, dict):
-        raise ValueError("configuration.devices must be a mapping")
+        raise TypeError("configuration.devices must be a mapping")
     result = {}
     for ieee, options in raw.items():
         if not isinstance(ieee, str) or not isinstance(options, dict):
-            raise ValueError("Invalid configuration.devices entry")
+            raise TypeError("Invalid configuration.devices entry")
         result[ieee.lower()] = options
     return result
 
@@ -76,7 +101,7 @@ def _config_devices(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def _config_groups(config: dict[str, Any]) -> dict[int, dict[str, Any]]:
     raw = config.get("groups") or {}
     if not isinstance(raw, dict):
-        raise ValueError("configuration.groups must be a mapping")
+        raise TypeError("configuration.groups must be a mapping")
     result = {}
     for group_id, options in raw.items():
         try:
@@ -84,7 +109,7 @@ def _config_groups(config: dict[str, Any]) -> dict[int, dict[str, Any]]:
         except (TypeError, ValueError) as exc:
             raise ValueError("Group IDs must be numeric") from exc
         if not isinstance(options, dict):
-            raise ValueError("Invalid configuration.groups entry")
+            raise TypeError("Invalid configuration.groups entry")
         result[gid] = options
     return result
 
@@ -100,7 +125,8 @@ def _canonical_target(ieee: str, canonical: dict[str, str]) -> str:
 
 
 def snapshot(bundle: Path) -> dict[str, Any]:
-    config, rows = _load_bundle(bundle)
+    config, rows, backup = _load_bundle(bundle, require_backup=True)
+    assert backup is not None
     device_cfg = _config_devices(config)
     group_cfg = _config_groups(config)
     devices_db = {
@@ -108,12 +134,14 @@ def snapshot(bundle: Path) -> dict[str, Any]:
         for row in rows
         if row.get("type") != "Group" and isinstance(row.get("ieeeAddr"), str)
     }
-    coordinators = [ieee for ieee, row in devices_db.items() if row.get("type") == "Coordinator"]
+    coordinators = [
+        ieee for ieee, row in devices_db.items() if row.get("type") == "Coordinator"
+    ]
     if len(coordinators) != 1:
         raise ValueError("Expected exactly one coordinator in database")
     coordinator = coordinators[0]
 
-    canonical = {}
+    canonical: dict[str, str] = {}
     for ieee in devices_db:
         canonical[ieee] = ieee
         canonical[_reverse_ieee(ieee)] = ieee
@@ -123,7 +151,7 @@ def snapshot(bundle: Path) -> dict[str, Any]:
         for row in rows
         if row.get("type") == "Group" and type(row.get("groupID")) is int
     }
-    groups = {}
+    groups: dict[str, dict] = {}
     for gid in sorted(set(groups_db) | set(group_cfg)):
         db = groups_db.get(gid, {})
         cfg = group_cfg.get(gid, {})
@@ -132,29 +160,39 @@ def snapshot(bundle: Path) -> dict[str, Any]:
             raw_ieee = member.get("deviceIeeeAddr")
             endpoint = member.get("endpointID")
             if isinstance(raw_ieee, str) and type(endpoint) is int:
-                members.append({"ieee": _canonical_target(raw_ieee, canonical), "endpoint": endpoint})
+                members.append({
+                    "ieee": _canonical_target(raw_ieee, canonical),
+                    "endpoint": endpoint,
+                })
         groups[str(gid)] = {
             "id": gid,
             "friendly_name": cfg.get("friendly_name") or f"group_{gid}",
-            "options": {k: v for k, v in cfg.items() if k not in GROUP_NON_OPTIONS},
-            "members": sorted(members, key=lambda x: (x["ieee"], x["endpoint"])),
+            "options": {
+                key: value
+                for key, value in cfg.items()
+                if key not in GROUP_NON_OPTIONS
+            },
+            "members": sorted(members, key=lambda item: (item["ieee"], item["endpoint"])),
         }
 
     device_groups = {ieee: [] for ieee in devices_db}
     for gid_s, group in groups.items():
         for member in group["members"]:
             if member["ieee"] in device_groups:
-                device_groups[member["ieee"]].append(
-                    {"group_id": int(gid_s), "endpoint": member["endpoint"]}
-                )
+                device_groups[member["ieee"]].append({
+                    "group_id": int(gid_s),
+                    "endpoint": member["endpoint"],
+                })
 
-    devices = {}
+    devices: dict[str, dict] = {}
     for ieee, db in sorted(devices_db.items()):
         if db.get("type") == "Coordinator":
             continue
         cfg = device_cfg.get(ieee, {})
         endpoints = {}
-        for ep_key, ep in sorted((db.get("endpoints") or {}).items(), key=lambda x: int(x[0])):
+        for ep_key, ep in sorted(
+            (db.get("endpoints") or {}).items(), key=lambda item: int(item[0])
+        ):
             if not isinstance(ep, dict):
                 continue
             custom_binds, coordinator_binds = [], []
@@ -168,7 +206,10 @@ def snapshot(bundle: Path) -> dict[str, Any]:
                         "target_endpoint": None,
                         "cluster": bind["cluster"],
                     })
-                elif bind.get("type") == "endpoint" and isinstance(bind.get("deviceIeeeAddress"), str):
+                elif (
+                    bind.get("type") == "endpoint"
+                    and isinstance(bind.get("deviceIeeeAddress"), str)
+                ):
                     target = _canonical_target(bind["deviceIeeeAddress"], canonical)
                     item = {
                         "target_kind": "device",
@@ -176,12 +217,20 @@ def snapshot(bundle: Path) -> dict[str, Any]:
                         "target_endpoint": bind.get("endpointID"),
                         "cluster": bind["cluster"],
                     }
-                    (coordinator_binds if target == coordinator else custom_binds).append(item)
+                    (
+                        coordinator_binds
+                        if target == coordinator
+                        else custom_binds
+                    ).append(item)
+
             reporting = []
             for report in ep.get("configuredReportings") or []:
                 if not isinstance(report, dict):
                     continue
-                if type(report.get("cluster")) is not int or type(report.get("attrId")) is not int:
+                if (
+                    type(report.get("cluster")) is not int
+                    or type(report.get("attrId")) is not int
+                ):
                     continue
                 reporting.append({
                     "cluster": report["cluster"],
@@ -190,6 +239,7 @@ def snapshot(bundle: Path) -> dict[str, Any]:
                     "maximum_report_interval": report.get("maxRepIntval"),
                     "reportable_change": report.get("repChange"),
                 })
+
             endpoints[str(ep_key)] = {
                 "custom_bindings": custom_binds,
                 "coordinator_bindings_reference": coordinator_binds,
@@ -205,21 +255,32 @@ def snapshot(bundle: Path) -> dict[str, Any]:
             "manufacturer_name": db.get("manufName"),
             "software_build_id": db.get("swBuildId"),
             "interview_state": db.get("interviewState"),
-            "options": {k: v for k, v in cfg.items() if k not in DEVICE_NON_OPTIONS},
+            "options": {
+                key: value
+                for key, value in cfg.items()
+                if key not in DEVICE_NON_OPTIONS
+            },
             "configured_reporting_option": cfg.get("reporting"),
             "homeassistant_option": cfg.get("homeassistant"),
-            "groups": sorted(device_groups.get(ieee, []), key=lambda x: (x["group_id"], x["endpoint"])),
+            "groups": sorted(
+                device_groups.get(ieee, []),
+                key=lambda item: (item["group_id"], item["endpoint"]),
+            ),
             "endpoints": endpoints,
         }
+
+    names = [item["friendly_name"].lower() for item in devices.values()]
+    if len(names) != len(set(names)):
+        raise ValueError("Duplicate friendly names found; manifest would be ambiguous")
 
     return {
         "format": FORMAT,
         "tool_version": VERSION,
         "captured_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_bundle_sha256": _sha256(bundle),
+        "source_network_fingerprint": backup_network_fingerprint(backup),
         "contains_network_secrets": False,
         "source_coordinator_ieee": coordinator,
-        "homeassistant_discovery_should_be_disabled_during_identity_restore": True,
         "devices": devices,
         "groups": groups,
     }
@@ -232,12 +293,30 @@ def save_new(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _atomic_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def load_manifest(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("format") != FORMAT:
         raise ValueError("Unsupported rebuild manifest")
     if not isinstance(data.get("devices"), dict) or not isinstance(data.get("groups"), dict):
-        raise ValueError("Malformed rebuild manifest")
+        raise TypeError("Malformed rebuild manifest")
     return data
 
 
@@ -248,6 +327,7 @@ def select_pilot(manifest: dict[str, Any], selectors: list[str], aliases: list[s
             raise ValueError("Alias must be IEEE=FRIENDLY_NAME")
         ieee, name = raw.split("=", 1)
         alias_map[ieee.lower()] = name
+
     by_name = {
         dev["friendly_name"].lower(): ieee
         for ieee, dev in manifest["devices"].items()
@@ -266,6 +346,9 @@ def select_pilot(manifest: dict[str, Any], selectors: list[str], aliases: list[s
         if ieee not in selected:
             selected.append(ieee)
 
+    if unresolved:
+        raise ValueError("Unresolved pilot selectors: " + ", ".join(unresolved))
+
     devices, needed_groups = {}, set()
     for ieee in selected:
         dev = json.loads(json.dumps(manifest["devices"][ieee]))
@@ -273,26 +356,39 @@ def select_pilot(manifest: dict[str, Any], selectors: list[str], aliases: list[s
             dev["friendly_name"] = alias_map[ieee]
             dev["friendly_name_explicit"] = True
         devices[ieee] = dev
-        needed_groups.update(x["group_id"] for x in dev.get("groups") or [])
+        needed_groups.update(item["group_id"] for item in dev.get("groups") or [])
         for ep in dev.get("endpoints", {}).values():
             for bind in ep.get("custom_bindings") or []:
                 if bind.get("target_kind") == "group":
                     needed_groups.add(bind["target_group_id"])
-    groups = {
-        str(gid): manifest["groups"][str(gid)]
-        for gid in sorted(needed_groups)
-        if str(gid) in manifest["groups"]
-    }
+
+    pilot_names = [item["friendly_name"].lower() for item in devices.values()]
+    if len(pilot_names) != len(set(pilot_names)):
+        raise ValueError("Pilot aliases create duplicate friendly names")
+
+    groups = {}
+    selected_set = set(selected)
+    for gid in sorted(needed_groups):
+        source = manifest["groups"].get(str(gid))
+        if source is None:
+            continue
+        group = json.loads(json.dumps(source))
+        group["members"] = [
+            member for member in group.get("members") or []
+            if member.get("ieee") in selected_set
+        ]
+        groups[str(gid)] = group
+
     return {
         "format": FORMAT,
         "tool_version": VERSION,
         "captured_at_utc": manifest["captured_at_utc"],
         "source_bundle_sha256": manifest["source_bundle_sha256"],
+        "source_network_fingerprint": manifest.get("source_network_fingerprint"),
         "contains_network_secrets": False,
         "source_coordinator_ieee": manifest["source_coordinator_ieee"],
         "pilot": True,
         "selectors": selectors,
-        "unresolved_selectors": unresolved,
         "devices": devices,
         "groups": groups,
     }
@@ -312,31 +408,35 @@ def _current_index(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[int
     return devices, groups
 
 
-def _joined_from_bundle(path: Path) -> tuple[dict[str, Any], dict[int, Any]]:
-    _, rows = _load_bundle(path)
-    return _current_index(rows)
+def _canonical_map(devices: dict[str, Any], coordinator: str) -> dict[str, str]:
+    result = {}
+    for ieee in set(devices) | {coordinator}:
+        result[ieee] = ieee
+        result[_reverse_ieee(ieee)] = ieee
+    return result
 
 
-def _target_name(manifest: dict[str, Any], bind: dict[str, Any]) -> str | None:
-    if bind["target_kind"] == "group":
-        group = manifest["groups"].get(str(bind["target_group_id"]))
-        return None if group is None else group["friendly_name"]
-    target = manifest["devices"].get(bind.get("target_ieee"))
-    return None if target is None else target["friendly_name"]
-
-
-def _group_custom_bindings(device: dict[str, Any]) -> list[dict[str, Any]]:
-    grouped = {}
+def _desired_bind_groups(device: dict[str, Any]) -> list[dict[str, Any]]:
+    grouped: dict[tuple, set[int]] = {}
     for ep_id, ep in device.get("endpoints", {}).items():
         for bind in ep.get("custom_bindings") or []:
             if bind["target_kind"] == "group":
                 key = (int(ep_id), "group", bind["target_group_id"], None)
             else:
-                key = (int(ep_id), "device", bind["target_ieee"], bind.get("target_endpoint"))
-            grouped.setdefault(key, []).append(bind["cluster"])
+                key = (
+                    int(ep_id),
+                    "device",
+                    bind["target_ieee"],
+                    bind.get("target_endpoint"),
+                )
+            grouped.setdefault(key, set()).add(bind["cluster"])
     result = []
     for (source_ep, kind, target, target_ep), clusters in sorted(grouped.items(), key=str):
-        item = {"source_endpoint": source_ep, "target_kind": kind, "clusters": sorted(set(clusters))}
+        item = {
+            "source_endpoint": source_ep,
+            "target_kind": kind,
+            "clusters": sorted(clusters),
+        }
         if kind == "group":
             item["target_group_id"] = target
         else:
@@ -346,89 +446,320 @@ def _group_custom_bindings(device: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
-def plan(manifest: dict[str, Any], current_bundle: Path,
-         include_reporting: bool = False) -> dict[str, Any]:
-    current_config, current_rows = _load_bundle(current_bundle)
+def _current_custom_bind_set(
+    row: dict,
+    devices: dict[str, Any],
+    coordinator: str,
+) -> set[tuple]:
+    canonical = _canonical_map(devices, coordinator)
+    result = set()
+    for ep_id, ep in (row.get("endpoints") or {}).items():
+        if not isinstance(ep, dict):
+            continue
+        for bind in ep.get("binds") or []:
+            if not isinstance(bind, dict) or type(bind.get("cluster")) is not int:
+                continue
+            if bind.get("type") == "group" and type(bind.get("groupID")) is int:
+                result.add((int(ep_id), "group", bind["groupID"], None, bind["cluster"]))
+            elif (
+                bind.get("type") == "endpoint"
+                and isinstance(bind.get("deviceIeeeAddress"), str)
+            ):
+                target = _canonical_target(bind["deviceIeeeAddress"], canonical)
+                if target == coordinator:
+                    continue
+                result.add((
+                    int(ep_id),
+                    "device",
+                    target,
+                    bind.get("endpointID"),
+                    bind["cluster"],
+                ))
+    return result
+
+
+def _desired_custom_bind_set(device: dict) -> set[tuple]:
+    result = set()
+    for ep_id, ep in device.get("endpoints", {}).items():
+        for bind in ep.get("custom_bindings") or []:
+            if bind["target_kind"] == "group":
+                result.add((
+                    int(ep_id),
+                    "group",
+                    bind["target_group_id"],
+                    None,
+                    bind["cluster"],
+                ))
+            else:
+                result.add((
+                    int(ep_id),
+                    "device",
+                    bind["target_ieee"],
+                    bind.get("target_endpoint"),
+                    bind["cluster"],
+                ))
+    return result
+
+
+def _current_reporting_set(row: dict) -> set[tuple]:
+    result = set()
+    for ep_id, ep in (row.get("endpoints") or {}).items():
+        if not isinstance(ep, dict):
+            continue
+        for report in ep.get("configuredReportings") or []:
+            if (
+                isinstance(report, dict)
+                and type(report.get("cluster")) is int
+                and type(report.get("attrId")) is int
+            ):
+                result.add((
+                    int(ep_id),
+                    report["cluster"],
+                    report["attrId"],
+                    report.get("minRepIntval"),
+                    report.get("maxRepIntval"),
+                    report.get("repChange"),
+                ))
+    return result
+
+
+def _desired_reporting_set(device: dict) -> set[tuple]:
+    result = set()
+    for ep_id, ep in device.get("endpoints", {}).items():
+        for report in ep.get("configured_reportings_reference") or []:
+            result.add((
+                int(ep_id),
+                report["cluster"],
+                report["attribute"],
+                report.get("minimum_report_interval"),
+                report.get("maximum_report_interval"),
+                report.get("reportable_change"),
+            ))
+    return result
+
+
+def _op_id(scope: str, topic: str, payload: dict, reason: str) -> str:
+    raw = json.dumps(
+        {"scope": scope, "topic": topic, "payload": payload, "reason": reason},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(raw).hexdigest()[:24]
+
+
+def _operation(
+    scope: str,
+    topic: str,
+    payload: dict,
+    reason: str,
+    *,
+    related_scopes: list[str] | None = None,
+    continue_on_failure: bool = False,
+) -> dict:
+    item = {
+        "scope": scope,
+        "topic": topic,
+        "payload": payload,
+        "reason": reason,
+        "continue_on_failure": continue_on_failure,
+    }
+    if related_scopes:
+        item["related_scopes"] = sorted(set(related_scopes))
+    item["op_id"] = _op_id(scope, topic, payload, reason)
+    return item
+
+
+def _new_journal(network_fingerprint: str) -> dict:
+    return {
+        "format": JOURNAL_FORMAT,
+        "tool_version": VERSION,
+        "network_fingerprint": network_fingerprint,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "completed": {},
+        "failures": [],
+    }
+
+
+def _load_journal(path: Path | None, network_fingerprint: str) -> dict:
+    if path is None or not path.exists():
+        return _new_journal(network_fingerprint)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("format") != JOURNAL_FORMAT:
+        raise ValueError("Unsupported rebuild journal")
+    if data.get("network_fingerprint") != network_fingerprint:
+        raise RuntimeError("Rebuild journal belongs to a different Zigbee network")
+    if not isinstance(data.get("completed"), dict) or not isinstance(data.get("failures"), list):
+        raise TypeError("Malformed rebuild journal")
+    return data
+
+
+def _group_related_scopes(manifest: dict, group_id: int) -> list[str]:
+    related = {
+        member["ieee"]
+        for member in manifest["groups"].get(str(group_id), {}).get("members") or []
+        if isinstance(member.get("ieee"), str)
+    }
+    for ieee, device in manifest["devices"].items():
+        for ep in device.get("endpoints", {}).values():
+            if any(
+                bind.get("target_kind") == "group"
+                and bind.get("target_group_id") == group_id
+                for bind in ep.get("custom_bindings") or []
+            ):
+                related.add(ieee)
+    return sorted(related)
+
+
+def plan(
+    manifest: dict[str, Any],
+    current_bundle: Path,
+    journal_path: Path | None = None,
+) -> dict[str, Any]:
+    current_config, current_rows, current_backup = _load_bundle(
+        current_bundle, require_backup=True
+    )
+    assert current_backup is not None
+    network_fingerprint = backup_network_fingerprint(current_backup)
+    journal = _load_journal(journal_path, network_fingerprint)
+    completed = set(journal["completed"])
+
     current_devices, current_groups = _current_index(current_rows)
     current_device_cfg = _config_devices(current_config)
     current_group_cfg = _config_groups(current_config)
+    current_coordinator = "0x" + str(current_backup["coordinator_ieee"]).lower().removeprefix("0x")
     operations, deferred, status_map = [], [], {}
 
-    for gid_s, group in sorted(manifest["groups"].items(), key=lambda x: int(x[0])):
+    def add(item: dict) -> None:
+        if item["op_id"] not in completed:
+            operations.append(item)
+
+    for gid_s, group in sorted(manifest["groups"].items(), key=lambda item: int(item[0])):
         gid = int(gid_s)
-        if gid not in current_groups:
-            operations.append({
-                "scope": "group",
-                "topic": "zigbee2mqtt/bridge/request/group/add",
-                "payload": {"id": gid, "friendly_name": group["friendly_name"]},
-                "reason": "restore_exact_group_id",
-            })
-        current_gcfg = current_group_cfg.get(gid, {})
-        current_gopts = {k: v for k, v in current_gcfg.items() if k not in GROUP_NON_OPTIONS}
-        if group.get("options") and current_gopts != group["options"]:
-            operations.append({
-                "scope": "group",
-                "topic": "zigbee2mqtt/bridge/request/group/options",
-                "payload": {"id": group["friendly_name"], "options": group["options"]},
-                "reason": "restore_group_options",
-                "best_effort": True,
-            })
+        related = _group_related_scopes(manifest, gid)
+        existing = current_groups.get(gid)
+        current_cfg = current_group_cfg.get(gid, {})
+        if existing is None:
+            add(_operation(
+                f"group:{gid}",
+                "zigbee2mqtt/bridge/request/group/add",
+                {"id": gid, "friendly_name": group["friendly_name"]},
+                "restore_exact_group_id",
+                related_scopes=related,
+            ))
+        elif current_cfg.get("friendly_name") not in (None, group["friendly_name"]):
+            add(_operation(
+                f"group:{gid}",
+                "zigbee2mqtt/bridge/request/group/rename",
+                {
+                    "from": gid,
+                    "to": group["friendly_name"],
+                    "homeassistant_rename": False,
+                },
+                "restore_group_friendly_name",
+                related_scopes=related,
+            ))
+
+        current_options = {
+            key: value
+            for key, value in current_cfg.items()
+            if key not in GROUP_NON_OPTIONS
+        }
+        if group.get("options") and current_options != group["options"]:
+            add(_operation(
+                f"group:{gid}",
+                "zigbee2mqtt/bridge/request/group/options",
+                {"id": group["friendly_name"], "options": group["options"]},
+                "restore_group_options",
+                related_scopes=related,
+            ))
 
     for ieee, desired in sorted(manifest["devices"].items()):
         observed = current_devices.get(ieee)
         if observed is None:
-            status_map[ieee] = {"friendly_name": desired["friendly_name"], "state": "NOT_JOINED"}
+            status_map[ieee] = {
+                "friendly_name": desired["friendly_name"],
+                "state": "NOT_JOINED",
+            }
             continue
-        if observed.get("interviewState") not in (None, "SUCCESSFUL") and observed.get("interviewCompleted") is not True:
+
+        interview_ok = (
+            observed.get("interviewCompleted") is True
+            or observed.get("interviewState") == "SUCCESSFUL"
+        )
+        if not interview_ok:
             status_map[ieee] = {
                 "friendly_name": desired["friendly_name"],
                 "state": "JOINED_INTERVIEW_INCOMPLETE",
                 "interview_state": observed.get("interviewState"),
             }
             continue
-        status_map[ieee] = {"friendly_name": desired["friendly_name"], "state": "JOINED"}
+        status_map[ieee] = {
+            "friendly_name": desired["friendly_name"],
+            "state": "JOINED",
+        }
 
-        current_cfg = current_device_cfg.get(ieee, {})
-        if (desired.get("friendly_name_explicit") and
-                current_cfg.get("friendly_name") != desired["friendly_name"]):
-            operations.append({
-                "scope": ieee,
-                "topic": "zigbee2mqtt/bridge/request/device/rename",
-                "payload": {"from": ieee, "to": desired["friendly_name"], "homeassistant_rename": False},
-                "reason": "restore_friendly_name_by_ieee",
-            })
+        cfg = current_device_cfg.get(ieee, {})
+        if (
+            desired.get("friendly_name_explicit")
+            and cfg.get("friendly_name") != desired["friendly_name"]
+        ):
+            add(_operation(
+                ieee,
+                "zigbee2mqtt/bridge/request/device/rename",
+                {
+                    "from": ieee,
+                    "to": desired["friendly_name"],
+                    "homeassistant_rename": False,
+                },
+                "restore_friendly_name_by_ieee",
+            ))
+
         runtime_options = dict(desired.get("options") or {})
         if desired.get("configured_reporting_option") is not None:
             runtime_options["reporting"] = desired["configured_reporting_option"]
         current_runtime_options = {
-            k: v for k, v in current_cfg.items()
-            if k not in {"friendly_name", "homeassistant"}
+            key: value
+            for key, value in cfg.items()
+            if key not in {"friendly_name", "homeassistant"}
         }
         if runtime_options and current_runtime_options != runtime_options:
-            operations.append({
+            add(_operation(
+                ieee,
+                "zigbee2mqtt/bridge/request/device/options",
+                {"id": desired["friendly_name"], "options": runtime_options},
+                "restore_device_options",
+            ))
+
+        if desired.get("homeassistant_option") not in (None, {}):
+            deferred.append({
                 "scope": ieee,
-                "topic": "zigbee2mqtt/bridge/request/device/options",
-                "payload": {"id": desired["friendly_name"], "options": runtime_options},
-                "reason": "restore_device_options",
-                "best_effort": True,
+                "reason": "per_device_homeassistant_option_requires_review",
+                "value": desired["homeassistant_option"],
             })
-        operations.append({
-            "scope": ieee,
-            "topic": "zigbee2mqtt/bridge/request/device/configure",
-            "payload": {"id": desired["friendly_name"]},
-            "reason": "rebuild_converter_managed_bindings_and_reporting",
-            "best_effort": True,
-        })
+
+        # Configure once per network/journal. This is important for sleepy
+        # devices: failed attempts remain unjournalled and are retryable.
+        add(_operation(
+            ieee,
+            "zigbee2mqtt/bridge/request/device/configure",
+            {"id": desired["friendly_name"]},
+            "run_converter_configure_once",
+            continue_on_failure=True,
+        ))
 
         for membership in desired.get("groups") or []:
             group = manifest["groups"].get(str(membership["group_id"]))
             if group is None:
                 deferred.append({
-                    "scope": ieee, "reason": "group_definition_missing",
+                    "scope": ieee,
+                    "reason": "group_definition_missing",
                     "group_id": membership["group_id"],
                 })
                 continue
-            existing_members = current_groups.get(membership["group_id"], {}).get("members") or []
+            existing_members = current_groups.get(
+                membership["group_id"], {}
+            ).get("members") or []
             already_member = any(
                 isinstance(item, dict)
                 and str(item.get("deviceIeeeAddr", "")).lower() == ieee
@@ -436,169 +767,388 @@ def plan(manifest: dict[str, Any], current_bundle: Path,
                 for item in existing_members
             )
             if not already_member:
-                payload = {"group": group["friendly_name"], "device": desired["friendly_name"]}
+                payload = {
+                    "group": group["friendly_name"],
+                    "device": desired["friendly_name"],
+                }
                 if membership["endpoint"] != 1:
                     payload["endpoint"] = membership["endpoint"]
-                operations.append({
-                    "scope": ieee,
-                    "topic": "zigbee2mqtt/bridge/request/group/members/add",
-                    "payload": payload,
-                    "reason": "restore_group_membership",
-                })
+                add(_operation(
+                    ieee,
+                    "zigbee2mqtt/bridge/request/group/members/add",
+                    payload,
+                    "restore_group_membership",
+                ))
 
-        for bind in _group_custom_bindings(desired):
-            target_name = _target_name(manifest, bind)
-            if target_name is None:
-                deferred.append({
-                    "scope": ieee, "reason": "binding_target_not_in_manifest",
-                    "binding": bind,
-                })
+        current_binds = _current_custom_bind_set(
+            observed, current_devices, current_coordinator
+        )
+        desired_binds = _desired_custom_bind_set(desired)
+        missing_binds = desired_binds - current_binds
+        for bind_group in _desired_bind_groups(desired):
+            wanted_tuples = set()
+            for cluster in bind_group["clusters"]:
+                if bind_group["target_kind"] == "group":
+                    wanted_tuples.add((
+                        bind_group["source_endpoint"],
+                        "group",
+                        bind_group["target_group_id"],
+                        None,
+                        cluster,
+                    ))
+                else:
+                    wanted_tuples.add((
+                        bind_group["source_endpoint"],
+                        "device",
+                        bind_group["target_ieee"],
+                        bind_group.get("target_endpoint"),
+                        cluster,
+                    ))
+            missing_clusters = sorted(
+                item[-1] for item in (wanted_tuples & missing_binds)
+            )
+            if not missing_clusters:
                 continue
-            if bind["target_kind"] == "device" and bind["target_ieee"] not in current_devices:
-                deferred.append({
-                    "scope": ieee, "reason": "binding_target_not_joined",
-                    "binding": bind,
-                })
-                continue
-            cluster_names = [BIND_CLUSTER_NAMES.get(cluster) for cluster in bind["clusters"]]
+
+            if bind_group["target_kind"] == "group":
+                target = manifest["groups"].get(str(bind_group["target_group_id"]))
+                if target is None:
+                    deferred.append({
+                        "scope": ieee,
+                        "reason": "binding_group_target_missing",
+                        "binding": bind_group,
+                    })
+                    continue
+                target_name = target["friendly_name"]
+            else:
+                target = manifest["devices"].get(bind_group["target_ieee"])
+                if target is None:
+                    deferred.append({
+                        "scope": ieee,
+                        "reason": "binding_device_target_not_in_manifest",
+                        "binding": bind_group,
+                    })
+                    continue
+                if bind_group["target_ieee"] not in current_devices:
+                    deferred.append({
+                        "scope": ieee,
+                        "reason": "binding_device_target_not_joined",
+                        "binding": bind_group,
+                    })
+                    continue
+                target_name = target["friendly_name"]
+
+            cluster_names = [BIND_CLUSTER_NAMES.get(cluster) for cluster in missing_clusters]
             if any(name is None for name in cluster_names):
                 deferred.append({
-                    "scope": ieee, "reason": "binding_cluster_not_supported_by_z2m_api",
-                    "binding": bind,
+                    "scope": ieee,
+                    "reason": "binding_cluster_not_supported_by_reconciler",
+                    "clusters": missing_clusters,
+                    "binding": bind_group,
                 })
                 continue
+
             payload = {
                 "from": desired["friendly_name"],
-                "from_endpoint": bind["source_endpoint"],
+                "from_endpoint": bind_group["source_endpoint"],
                 "to": target_name,
                 "clusters": cluster_names,
             }
-            if bind["target_kind"] == "device" and bind.get("target_endpoint") is not None:
-                payload["to_endpoint"] = bind["target_endpoint"]
-            operations.append({
-                "scope": ieee,
-                "topic": "zigbee2mqtt/bridge/request/device/bind",
-                "payload": payload,
-                "reason": "restore_non_coordinator_binding",
-            })
+            if (
+                bind_group["target_kind"] == "device"
+                and bind_group.get("target_endpoint") is not None
+            ):
+                payload["to_endpoint"] = bind_group["target_endpoint"]
+            add(_operation(
+                ieee,
+                "zigbee2mqtt/bridge/request/device/bind",
+                payload,
+                "restore_missing_non_coordinator_binding",
+            ))
 
-        if include_reporting:
-            for ep_id, ep in desired.get("endpoints", {}).items():
-                for report in ep.get("configured_reportings_reference") or []:
-                    payload = {
-                        "id": desired["friendly_name"],
-                        "endpoint": int(ep_id),
-                        "cluster": report["cluster"],
-                        "attribute": report["attribute"],
-                        "minimum_report_interval": report["minimum_report_interval"],
-                        "maximum_report_interval": report["maximum_report_interval"],
-                    }
-                    if report.get("reportable_change") is not None:
-                        payload["reportable_change"] = report["reportable_change"]
-                    operations.append({
-                        "scope": ieee,
-                        "topic": "zigbee2mqtt/bridge/request/device/reporting/configure",
-                        "payload": payload,
-                        "reason": "restore_cached_reporting_reference",
-                        "best_effort": True,
-                    })
+        desired_reporting = _desired_reporting_set(desired)
+        if desired_reporting and not desired_reporting <= _current_reporting_set(observed):
+            deferred.append({
+                "scope": ieee,
+                "reason": "reporting_reference_mismatch_use_configure_then_review",
+                "missing_count": len(
+                    desired_reporting - _current_reporting_set(observed)
+                ),
+            })
 
     return {
         "format": PLAN_FORMAT,
         "tool_version": VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "network_fingerprint": network_fingerprint,
         "manifest_source_bundle_sha256": manifest["source_bundle_sha256"],
-        "homeassistant_discovery_should_be_disabled_during_identity_restore": True,
-        "reporting_replay_enabled": include_reporting,
         "operations": operations,
         "deferred": deferred,
         "device_status": status_map,
+        "journal_completed_count": len(completed),
+        "raw_reporting_replay_enabled": False,
+    }
+
+
+def _normalize_group_members(group: dict) -> set[tuple[str, int]]:
+    return {
+        (str(item.get("deviceIeeeAddr", "")).lower(), item.get("endpointID"))
+        for item in group.get("members") or []
+        if isinstance(item, dict)
     }
 
 
 def status(manifest: dict[str, Any], current_bundle: Path) -> dict[str, Any]:
-    current_devices, current_groups = _joined_from_bundle(current_bundle)
-    joined = successful = 0
-    devices = {}
+    config, rows, backup = _load_bundle(current_bundle, require_backup=True)
+    assert backup is not None
+    current_devices, current_groups = _current_index(rows)
+    device_cfg = _config_devices(config)
+    group_cfg = _config_groups(config)
+    coordinator = "0x" + str(backup["coordinator_ieee"]).lower().removeprefix("0x")
+
+    device_results = {}
+    fully_restored = 0
     for ieee, desired in sorted(manifest["devices"].items()):
         row = current_devices.get(ieee)
         if row is None:
-            devices[ieee] = {"friendly_name": desired["friendly_name"], "state": "NOT_JOINED"}
+            device_results[ieee] = {
+                "friendly_name": desired["friendly_name"],
+                "joined": False,
+                "fully_restored": False,
+            }
             continue
-        joined += 1
-        ok = row.get("interviewCompleted") is True or row.get("interviewState") == "SUCCESSFUL"
-        successful += int(ok)
-        devices[ieee] = {
+
+        cfg = device_cfg.get(ieee, {})
+        interview_ok = (
+            row.get("interviewCompleted") is True
+            or row.get("interviewState") == "SUCCESSFUL"
+        )
+        name_ok = (
+            not desired.get("friendly_name_explicit")
+            or cfg.get("friendly_name") == desired["friendly_name"]
+        )
+        desired_options = dict(desired.get("options") or {})
+        if desired.get("configured_reporting_option") is not None:
+            desired_options["reporting"] = desired["configured_reporting_option"]
+        current_options = {
+            key: value
+            for key, value in cfg.items()
+            if key not in {"friendly_name", "homeassistant"}
+        }
+        options_ok = current_options == desired_options
+
+        groups_ok = True
+        for membership in desired.get("groups") or []:
+            members = _normalize_group_members(
+                current_groups.get(membership["group_id"], {})
+            )
+            if (ieee, membership["endpoint"]) not in members:
+                groups_ok = False
+                break
+
+        bindings_ok = _desired_custom_bind_set(desired) <= _current_custom_bind_set(
+            row, current_devices, coordinator
+        )
+        reporting_ok = _desired_reporting_set(desired) <= _current_reporting_set(row)
+        homeassistant_review = desired.get("homeassistant_option") not in (None, {})
+        restored = (
+            interview_ok
+            and name_ok
+            and options_ok
+            and groups_ok
+            and bindings_ok
+            and reporting_ok
+            and not homeassistant_review
+        )
+        fully_restored += int(restored)
+        device_results[ieee] = {
             "friendly_name": desired["friendly_name"],
-            "state": "INTERVIEW_SUCCESSFUL" if ok else "JOINED_NOT_READY",
+            "joined": True,
+            "interview_ok": interview_ok,
+            "name_ok": name_ok,
+            "options_ok": options_ok,
+            "groups_ok": groups_ok,
+            "custom_bindings_ok": bindings_ok,
+            "reporting_reference_ok": reporting_ok,
+            "homeassistant_option_review_required": homeassistant_review,
+            "fully_restored": restored,
             "role": row.get("type"),
             "model_id": row.get("modelId"),
         }
+
+    group_results = {}
+    for gid_s, desired in sorted(manifest["groups"].items(), key=lambda item: int(item[0])):
+        gid = int(gid_s)
+        row = current_groups.get(gid)
+        cfg = group_cfg.get(gid, {})
+        current_options = {
+            key: value for key, value in cfg.items() if key not in GROUP_NON_OPTIONS
+        }
+        expected_members = {
+            (member["ieee"], member["endpoint"])
+            for member in desired.get("members") or []
+        }
+        current_members = _normalize_group_members(row or {})
+        group_results[gid_s] = {
+            "exists": row is not None,
+            "name_ok": cfg.get("friendly_name") in (None, desired["friendly_name"])
+            if row is not None else False,
+            "options_ok": current_options == (desired.get("options") or {}),
+            "expected_members_present": expected_members <= current_members,
+        }
+
     return {
         "tool_version": VERSION,
+        "network_fingerprint": backup_network_fingerprint(backup),
         "expected_devices": len(manifest["devices"]),
-        "joined_devices": joined,
-        "interview_successful": successful,
-        "missing_group_ids": sorted(int(g) for g in manifest["groups"] if int(g) not in current_groups),
-        "devices": devices,
+        "joined_devices": sum(item["joined"] for item in device_results.values()),
+        "fully_restored_devices": fully_restored,
+        "devices": device_results,
+        "groups": group_results,
     }
 
 
 REMOTE_APPLY = r"""
-import json,re,subprocess,sys,time
-ops=json.load(open(sys.argv[1],encoding="utf-8"))
-cfg=open("/homeassistant/zigbee2mqtt/configuration.yaml",encoding="utf-8").read()
-server=re.search(r"server:\s*mqtt://([^:/\s]+)(?::(\d+))?",cfg)
-user=re.search(r"^\s*user:\s*(\S+)",cfg,re.M)
-password=re.search(r"^\s*password:\s*(\S+)",cfg,re.M)
-base_topic_match=re.search(r"(?ms)^mqtt:\s*\n(?:(?:^[ \t]+.*\n)*)?^[ \t]+base_topic:\s*(\S+)",cfg)
-base_topic=base_topic_match.group(1) if base_topic_match else "zigbee2mqtt"
-if not server:
-    print(json.dumps({"ok":False,"error":"mqtt server not found"})); sys.exit(2)
-base=["-h",server.group(1),"-p",server.group(2) or "1883"]
-if user:
-    if not password:
-        print(json.dumps({"ok":False,"error":"mqtt password missing"})); sys.exit(2)
-    base += ["-u",user.group(1),"-P",password.group(1)]
+import json,subprocess,sys,time
+envelope=json.load(open(sys.argv[1],encoding="utf-8"))
+broker=envelope["broker"]
+ops=envelope["operations"]
+base=["-h",broker["host"],"-p",str(broker["port"])]
+if broker.get("user") is not None:
+    base += ["-u",broker["user"],"-P",broker["password"]]
 results=[]
-for idx,op in enumerate(ops):
+for index,op in enumerate(ops):
     topic=op["topic"]
+    base_topic=envelope["base_topic"]
     if topic.startswith("zigbee2mqtt/"):
         topic=base_topic+"/"+topic[len("zigbee2mqtt/"):]
-    payload=dict(op["payload"]); tx=710000+idx; payload["transaction"]=tx
+    payload=dict(op["payload"])
+    tx=810000+index
+    payload["transaction"]=tx
     response=topic.replace("/request/","/response/",1)
-    sub=subprocess.Popen(["mosquitto_sub"]+base+["-t",response,"-C","1","-W","18"],
-                         stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    subscriber=subprocess.Popen(
+        ["mosquitto_sub"]+base+["-t",response,"-C","1","-W","20"],
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,
+    )
     time.sleep(0.15)
-    pub=subprocess.run(["mosquitto_pub"]+base+["-t",topic,"-m",json.dumps(payload)],
-                       capture_output=True,text=True,timeout=10)
-    if pub.returncode!=0:
-        sub.kill(); results.append({"index":idx,"status":"pub_error"}); break
-    out,err=sub.communicate(timeout=22)
-    try: data=json.loads(out.strip()) if out.strip() else {}
-    except ValueError: data={}
-    if data.get("transaction") != tx:
-        results.append({"index":idx,"status":"response_mismatch"}); break
-    results.append({"index":idx,"status":data.get("status","error"),"error":data.get("error")})
-    if data.get("status")!="ok" and not op.get("best_effort"):
+    publisher=subprocess.run(
+        ["mosquitto_pub"]+base+["-t",topic,"-m",json.dumps(payload)],
+        capture_output=True,text=True,timeout=12,
+    )
+    if publisher.returncode!=0:
+        subscriber.kill()
+        results.append({"op_id":op["op_id"],"status":"publish_error"})
+        if not op.get("continue_on_failure"):
+            break
+        continue
+    try:
+        out,err=subscriber.communicate(timeout=24)
+    except subprocess.TimeoutExpired:
+        subscriber.kill(); subscriber.communicate()
+        results.append({"op_id":op["op_id"],"status":"response_timeout"})
+        if not op.get("continue_on_failure"):
+            break
+        continue
+    try:
+        data=json.loads(out.strip()) if out.strip() else {}
+    except ValueError:
+        data={}
+    if data.get("transaction")!=tx:
+        results.append({"op_id":op["op_id"],"status":"response_mismatch"})
+        if not op.get("continue_on_failure"):
+            break
+        continue
+    results.append({
+        "op_id":op["op_id"],
+        "status":data.get("status","error"),
+        "error":data.get("error"),
+    })
+    if data.get("status")!="ok" and not op.get("continue_on_failure"):
         break
-print(json.dumps({"ok":all(r["status"]=="ok" for r in results),"results":results}))
+print(json.dumps({"results":results}))
 """
 
 
-def apply(plan_data: dict[str, Any], scopes: list[str], approval: str) -> dict[str, Any]:
+def _select_operations(plan_data: dict, scopes: list[str]) -> list[dict]:
+    wanted = {item.lower() for item in scopes}
+    if not wanted:
+        return list(plan_data.get("operations") or [])
+    selected = []
+    for op in plan_data.get("operations") or []:
+        scope = str(op.get("scope", "")).lower()
+        if scope in wanted:
+            selected.append(op)
+            continue
+        related = {
+            str(item).lower() for item in op.get("related_scopes") or []
+        }
+        if related & wanted:
+            selected.append(op)
+    return selected
+
+
+def _broker_from_config(config: dict) -> tuple[dict, str]:
+    mqtt = config.get("mqtt") or {}
+    if not isinstance(mqtt, dict):
+        raise TypeError("mqtt configuration is not a mapping")
+    server = mqtt.get("server")
+    if not isinstance(server, str):
+        raise TypeError("mqtt.server is unavailable")
+    parsed = urlparse(server)
+    if parsed.scheme != "mqtt" or not parsed.hostname:
+        raise ValueError("Only mqtt:// broker transport is supported by reconciler apply")
+    user = mqtt.get("user")
+    password = mqtt.get("password")
+    if user is not None and (not isinstance(user, str) or not isinstance(password, str)):
+        raise ValueError("MQTT username/password must be resolved strings")
+    base_topic = mqtt.get("base_topic") or "zigbee2mqtt"
+    if not isinstance(base_topic, str):
+        raise TypeError("mqtt.base_topic is invalid")
+    return {
+        "host": parsed.hostname,
+        "port": parsed.port or 1883,
+        "user": user,
+        "password": password,
+    }, base_topic
+
+
+def _load_live_backup_and_config(client) -> tuple[dict, dict]:
+    sftp = client.open_sftp()
+    roots = ("/config/zigbee2mqtt", "/homeassistant/zigbee2mqtt")
+    found = []
+    for root in roots:
+        try:
+            with sftp.open(root + "/configuration.yaml", "rb") as stream:
+                cfg = yaml.safe_load(stream.read())
+            with sftp.open(root + "/coordinator_backup.json", "rb") as stream:
+                backup = json.loads(stream.read().decode("utf-8"))
+            if isinstance(cfg, dict) and isinstance(backup, dict):
+                found.append((cfg, backup))
+        except FileNotFoundError:
+            continue
+    if len(found) != 1:
+        raise RuntimeError("Unable to identify a unique live Zigbee2MQTT data root")
+    return found[0]
+
+
+def apply(
+    plan_data: dict[str, Any],
+    scopes: list[str],
+    approval: str,
+    journal_path: Path,
+) -> dict[str, Any]:
     if approval != APPLY_APPROVAL:
         raise ValueError("Exact apply approval phrase required")
     if plan_data.get("format") != PLAN_FORMAT:
         raise ValueError("Unsupported operation plan")
-    wanted = {x.lower() for x in scopes}
-    selected = []
-    for op in plan_data.get("operations") or []:
-        scope = str(op.get("scope", "")).lower()
-        if not wanted or scope in wanted or scope == "group":
-            selected.append(op)
+    expected_fingerprint = plan_data.get("network_fingerprint")
+    if not isinstance(expected_fingerprint, str):
+        raise TypeError("Plan has no network fingerprint")
+
+    selected = _select_operations(plan_data, scopes)
     if not selected:
         raise ValueError("No operations selected")
+    journal = _load_journal(journal_path, expected_fingerprint)
 
     spec = importlib.util.spec_from_file_location("p10_ha", HELPER)
     if spec is None or spec.loader is None:
@@ -606,27 +1156,92 @@ def apply(plan_data: dict[str, Any], scopes: list[str], approval: str) -> dict[s
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     client = module.connect("ha")
-    remote_py = "/tmp/p10_rebuild_apply.py"
-    remote_json = "/tmp/p10_rebuild_ops.json"
+    remote_json = "/tmp/p10_rebuild_apply_" + os.urandom(6).hex() + ".json"
+    remote_py = "/tmp/p10_rebuild_apply_" + os.urandom(6).hex() + ".py"
+
     try:
-        _, out, _ = client.exec_command(f"ha apps info {ADDON} --raw-json", timeout=20)
-        info = json.loads(out.read().decode("utf-8"))
-        if out.channel.recv_exit_status() != 0 or info.get("data", {}).get("state") != "started":
+        from p10_data_bundle import addon_info
+
+        info = addon_info(client)
+        if info.get("state") != "started":
             raise RuntimeError("Zigbee2MQTT add-on is not started")
+
+        live_config, live_backup = _load_live_backup_and_config(client)
+        live_fingerprint = backup_network_fingerprint(live_backup)
+        if live_fingerprint != expected_fingerprint:
+            raise RuntimeError("Plan belongs to a different live Zigbee network")
+
+        broker, base_topic = _broker_from_config(live_config)
+        envelope = {
+            "broker": broker,
+            "base_topic": base_topic,
+            "operations": selected,
+        }
         sftp = client.open_sftp()
         with sftp.open(remote_py, "w") as stream:
             stream.write(REMOTE_APPLY)
         with sftp.open(remote_json, "w") as stream:
-            json.dump(selected, stream)
+            json.dump(envelope, stream)
+
         _, stdout, _ = client.exec_command(
-            f"python3 {remote_py} {remote_json}", timeout=max(60, len(selected) * 30)
+            f"python3 {remote_py} {remote_json}",
+            timeout=max(90, len(selected) * 35),
         )
         raw = stdout.read().decode("utf-8", errors="replace").strip()
         rc = stdout.channel.recv_exit_status()
-        result = json.loads(raw) if raw.startswith("{") else {"ok": False, "error": "transport"}
         if rc != 0:
-            raise RuntimeError("Remote MQTT reconciliation failed")
-        return {"tool_version": VERSION, "operations_selected": len(selected), "remote_result": result}
+            raise RuntimeError("Remote MQTT reconciliation transport failed")
+        response = json.loads(raw)
+        results = response.get("results")
+        if not isinstance(results, list):
+            raise TypeError("Remote MQTT reconciliation returned malformed results")
+
+        by_id = {op["op_id"]: op for op in selected}
+        failures = []
+        for result in results:
+            op_id = result.get("op_id")
+            if op_id not in by_id:
+                failures.append({"op_id": op_id, "status": "unknown_result"})
+                continue
+            if result.get("status") == "ok":
+                journal["completed"][op_id] = {
+                    "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "scope": by_id[op_id]["scope"],
+                    "reason": by_id[op_id]["reason"],
+                }
+            else:
+                failures.append(result)
+
+        returned_ids = {item.get("op_id") for item in results}
+        for op in selected:
+            if op["op_id"] not in returned_ids:
+                failures.append({
+                    "op_id": op["op_id"],
+                    "status": "not_executed_after_prior_failure",
+                })
+
+        if failures:
+            journal["failures"].append({
+                "at_utc": datetime.now(timezone.utc).isoformat(),
+                "failures": failures,
+            })
+        journal["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+        _atomic_json(journal_path, journal)
+
+        if failures:
+            raise RuntimeError(
+                f"Reconciliation incomplete: {len(failures)} operation(s) failed; "
+                "successful operations were journalled for safe retry"
+            )
+
+        return {
+            "tool_version": VERSION,
+            "network_fingerprint_verified": True,
+            "operations_selected": len(selected),
+            "operations_completed": len(selected),
+            "journal": str(journal_path),
+            "all_operations_succeeded": True,
+        }
     finally:
         try:
             client.exec_command(f"rm -f {remote_py} {remote_json}", timeout=10)
@@ -652,15 +1267,17 @@ def main(argv: list[str] | None = None) -> int:
     make_plan = sub.add_parser("plan")
     make_plan.add_argument("--manifest", required=True, type=Path)
     make_plan.add_argument("--current-bundle", required=True, type=Path)
+    make_plan.add_argument("--journal", type=Path)
     make_plan.add_argument("--include-reporting", action="store_true")
     make_plan.add_argument("--out", required=True, type=Path)
 
-    stat = sub.add_parser("status")
-    stat.add_argument("--manifest", required=True, type=Path)
-    stat.add_argument("--current-bundle", required=True, type=Path)
+    stat_cmd = sub.add_parser("status")
+    stat_cmd.add_argument("--manifest", required=True, type=Path)
+    stat_cmd.add_argument("--current-bundle", required=True, type=Path)
 
     run = sub.add_parser("apply")
     run.add_argument("--plan", required=True, type=Path)
+    run.add_argument("--journal", required=True, type=Path)
     run.add_argument("--scope", action="append", default=[])
     run.add_argument("--execute", action="store_true")
     run.add_argument("--approval", default="")
@@ -671,24 +1288,40 @@ def main(argv: list[str] | None = None) -> int:
             result = snapshot(args.bundle)
             save_new(args.out, result)
             summary = {
-                "status": "MANIFEST_CREATED", "tool_version": VERSION,
-                "devices": len(result["devices"]), "groups": len(result["groups"]),
-                "contains_network_secrets": False, "out": str(args.out),
+                "status": "MANIFEST_CREATED",
+                "tool_version": VERSION,
+                "devices": len(result["devices"]),
+                "groups": len(result["groups"]),
+                "contains_network_secrets": False,
+                "out": str(args.out),
             }
         elif args.action == "pilot":
             result = select_pilot(load_manifest(args.manifest), args.device, args.alias)
             save_new(args.out, result)
             summary = {
-                "status": "PILOT_MANIFEST_CREATED", "devices": len(result["devices"]),
+                "status": "PILOT_MANIFEST_CREATED",
+                "devices": len(result["devices"]),
                 "groups": len(result["groups"]),
-                "unresolved_selectors": result["unresolved_selectors"], "out": str(args.out),
+                "out": str(args.out),
             }
         elif args.action == "plan":
-            result = plan(load_manifest(args.manifest), args.current_bundle, args.include_reporting)
+            if args.include_reporting:
+                raise ValueError(
+                    "Raw reporting replay is disabled in v0.2; use device/configure "
+                    "and status verification instead"
+                )
+            result = plan(
+                load_manifest(args.manifest),
+                args.current_bundle,
+                args.journal,
+            )
             save_new(args.out, result)
             summary = {
-                "status": "PLAN_CREATED", "operations": len(result["operations"]),
-                "deferred": len(result["deferred"]), "out": str(args.out),
+                "status": "PLAN_CREATED",
+                "operations": len(result["operations"]),
+                "deferred": len(result["deferred"]),
+                "network_fingerprint": result["network_fingerprint"],
+                "out": str(args.out),
             }
         elif args.action == "status":
             summary = status(load_manifest(args.manifest), args.current_bundle)
@@ -696,17 +1329,27 @@ def main(argv: list[str] | None = None) -> int:
             data = json.loads(args.plan.read_text(encoding="utf-8"))
             if not args.execute:
                 summary = {
-                    "status": "DRY_RUN_ONLY", "tool_version": VERSION,
-                    "operation_count": len(data.get("operations") or []),
+                    "status": "DRY_RUN_ONLY",
+                    "tool_version": VERSION,
+                    "operation_count": len(
+                        _select_operations(data, args.scope)
+                    ),
+                    "network_fingerprint": data.get("network_fingerprint"),
+                    "journal": str(args.journal),
                     "approval_required": APPLY_APPROVAL,
                 }
             else:
-                summary = apply(data, args.scope, args.approval)
+                summary = apply(
+                    data,
+                    args.scope,
+                    args.approval,
+                    args.journal,
+                )
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
-    except (OSError, ValueError, RuntimeError, KeyError, TypeError,
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError,
             json.JSONDecodeError, zipfile.BadZipFile) as exc:
-        print("P10_REBUILD_ERROR: " + str(exc)[:220], file=sys.stderr)
+        print("P10_REBUILD_ERROR: " + str(exc)[:300], file=sys.stderr)
         return 2
 
 

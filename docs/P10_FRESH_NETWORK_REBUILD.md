@@ -1,190 +1,163 @@
-# P10 fresh-network rebuild/reconciliation
+# P10 fresh-network rebuild / reconciliation
 
-## Purpose
+## Status
 
-`deploy/p10_rebuild_reconciler.py` reconstructs Zigbee2MQTT application state
-after devices are physically reset and commissioned onto a **fresh**
-MR4U CC2674P10 / Z-Stack network.
+Tooling version: 0.2.0.
 
-Tool version: **0.1.1**
+The first v0.1 pilot attempt uncovered a critical CC2674P10/Z-Stack behavior:
+standard zigbee-herdsman recommissioning (STARTUP_OPTION=0x03 plus new PAN/key)
+did not clear the extended address-manager table.
 
-It intentionally does **not** copy network keys, PAN/extPAN, Trust Center keys,
-frame counters or coordinator NVRAM into the rebuild manifest.
+The first post-commission backup showed:
+- address-manager capacity 457, used 10;
+- all 8 pre-pilot coordinator-backup IEEE entries still present;
+- 2 additional address entries;
+- fresh Zigbee2MQTT database with 0 ordinary devices.
 
-Captured/restorable application state:
+Therefore a new PAN/key is not sufficient evidence of a clean P10 on this
+firmware. v0.2 refuses live fresh commissioning without independent P10 NVRAM
+sanitation evidence.
 
-- device identity keyed by IEEE address;
-- Zigbee2MQTT friendly names and device options;
-- BSEED/custom `reporting:` options from configuration;
-- exact numeric group IDs, options and endpoint memberships;
-- non-coordinator device/group bindings;
-- cached ZCL reporting as an opt-in reference;
-- joined/interviewed progress during staged commissioning.
+No pilot device may be reset or paired while fresh_prejoin_state_clean=false.
 
-## Safety model
+## Recovery artifact terminology
 
-- `snapshot`, `pilot`, `plan` and `status` are local/read-only operations.
-- `apply` is dry-run unless `--execute` plus the exact approval phrase
-  `APPLY_P10_REBUILD_RECONCILIATION` are supplied.
-- Converter-managed coordinator bindings/reporting are not copied blindly.
-  A normal Zigbee2MQTT `device/configure` request is used after rejoin.
-- User/direct bindings are replayed only when the target exists.
-- Unsupported custom binding clusters are deferred for review rather than sent
-  as raw numeric cluster IDs.
-- Raw reporting replay is opt-in; converter configuration is preferred first.
-- Keep Home Assistant discovery disabled while names are being reconstructed,
-  then re-enable it once device identities are stable.
-- A temporary non-default MQTT base topic is supported and recommended for the
-  pilot so fresh-network messages cannot collide with production topics.
-
-The current MQTT operations were checked against the Zigbee2MQTT documentation
-updated 2026-08-22: group creation/options/membership, device rename/options,
-configure, bind and reporting/configure.
-
-## Current private recovery artifacts
-
-Verified current P10 cold rollback point:
-
-`C:\Workspace\.analienx\sonoff-private\issues\p10\bundles\cold-p10-pre-fresh-pilot-20260926T065336Z.zip`
+Verified cold bundle:
+C:\Workspace\.analienx\sonoff-private\issues\p10\bundles\cold-p10-pre-fresh-pilot-20260926T065336Z.zip
 
 SHA-256:
+387e68587df8e2872f73007513c2b8451a4be3735183d98a85510abc96e26a68
 
-`387e68587df8e2872f73007513c2b8451a4be3735183d98a85510abc96e26a68`
+This is a logical Zigbee2MQTT/coordinator-backup rollback point containing the
+captured application data and HA add-on options. It is not a raw byte-for-byte
+P10 NVRAM image.
 
-Full application reconstruction manifest:
+Rollback verification requires the production coordinator IEEE, PAN/extPAN,
+channel and network key to return; the expected coordinator-backup records and
+database device count must be present; and HA add-on options must match.
 
-`C:\Workspace\.analienx\sonoff-private\issues\p10\rebuild-manifest-v0.1.0-20260926.json`
+## Current v0.2 private manifests
 
-It contains **105 non-coordinator devices and 21 groups** and no Zigbee network
-secrets.
+Full:
+C:\Workspace\.analienx\sonoff-private\issues\p10\rebuild-manifest-v0.2.0-20260926.json
 
-Corrected pilot manifest:
+Pilot:
+C:\Workspace\.analienx\sonoff-private\issues\p10\pilot-manifest-v0.2.0-20260926.json
 
-`C:\Workspace\.analienx\sonoff-private\issues\p10\pilot-manifest-v0.1.0-workroom-window-left-20260926.json`
+The full manifest contains 105 non-coordinator devices and 21 groups. It stores
+friendly names, device options, group IDs/options/memberships, non-coordinator
+bindings and reporting references. It does not contain the Zigbee network key.
 
-## Commands
+The pilot set remains:
+- WRSocketWindowLeft — 0xa4c138ef578c9f75
+- KitchenSocketRight — 0xa4c138075cd16ed4
+- HallBreakerFA5 — 0x94b216fffe9260f5
+- RODRET A — 0x348d13fffefffa53
+- RODRET B — 0x08fd52fffed5864e
 
-Create a full manifest:
+Group 31 (Sockets Nonessential Shutdown) is included, but pilot group membership
+is filtered to selected pilot devices only.
 
-```powershell
-python deploy\p10_rebuild_reconciler.py snapshot `
-  --bundle <verified-cold-bundle.zip> `
-  --out <private-rebuild-manifest.json>
-```
+## Fresh-network cutover state machine
 
-Create a pilot subset:
+Tool: deploy/p10_fresh_network_pilot.py
 
-```powershell
-python deploy\p10_rebuild_reconciler.py pilot `
-  --manifest <private-rebuild-manifest.json> `
-  --device WRSocketWindowLeft `
-  --device KitchenSocketRight `
-  --device 0x348d13fffefffa53 `
-  --device 0x08fd52fffed5864e `
-  --device HallBreakerFA5 `
-  --alias 0x348d13fffefffa53=RODRET_Pilot_A `
-  --alias 0x08fd52fffed5864e=RODRET_Pilot_B `
-  --out <private-pilot-manifest.json>
-```
+v0.2 changes:
+- Supervisor startup is treated as an in-progress start, not a reason to send a
+  second start command.
+- Stop/start command exit codes are secondary to observed Supervisor and
+  container state.
+- Failed fresh verification never triggers an automatic rollback through a
+  startup race. The add-on is frozen stopped and explicit rollback is required.
+- Atomic file replacement has no destructive remove-then-rename fallback.
+- The official HA add-on forces Home Assistant discovery enabled, so the pilot
+  isolates discovery instead:
+  - MQTT base: zigbee2mqtt_p10_pilot
+  - discovery prefix: homeassistant_p10_pilot
+  - HA status topic: homeassistant_p10_pilot/status
+- Fresh verification requires 0 ordinary Z2M devices, 0 coordinator-backup
+  device entries, 0 address-manager entries, 0 security-manager entries,
+  0 APS link-key-data entries, 0 TCLK entries, no old IEEE overlap, and a
+  different network fingerprint from production.
+- Live cutover requires sanitation evidence format p10-nv-sanitation-evidence-v1.
+- Permit join is never opened by this tool.
 
-After some devices have joined the fresh network, capture a bundle of the fresh
-state and build a replay plan:
+Read-only status:
+python deploy\p10_fresh_network_pilot.py status
 
-```powershell
-python deploy\p10_rebuild_reconciler.py plan `
-  --manifest <private-pilot-manifest.json> `
-  --current-bundle <fresh-network-bundle.zip> `
-  --out <private-plan.json>
-```
+A fresh prejoin state is usable only when fresh_prejoin_state_clean=true.
 
-Inspect progress:
+Logical rollback:
+python deploy\p10_fresh_network_pilot.py rollback --bundle <cold.zip> --sha256 <sha> --approval RESTORE_PRE_PILOT_P10_LOGICAL_STATE
 
-```powershell
-python deploy\p10_rebuild_reconciler.py status `
-  --manifest <private-pilot-manifest.json> `
-  --current-bundle <fresh-network-bundle.zip>
-```
+Rollback performs: genuine quiescence, add-on option restoration if needed,
+atomic application-data restore, single startup, then production identity and
+database verification. Failure leaves the add-on stopped.
 
-Review the JSON plan before applying. Default apply is dry-run:
+## Application-state reconciler
 
-```powershell
-python deploy\p10_rebuild_reconciler.py apply --plan <private-plan.json>
-```
+Tool: deploy/p10_rebuild_reconciler.py
 
-Live replay can be limited to one IEEE at a time:
+Every executable plan is bound to a secret-free network fingerprint derived
+from coordinator IEEE, PAN ID, extended PAN ID and channel. Live apply re-reads
+the current coordinator backup and refuses to run against a different network.
 
-```powershell
-python deploy\p10_rebuild_reconciler.py apply `
-  --plan <private-plan.json> `
-  --scope 0xa4c138075cd16ed4 `
-  --execute `
-  --approval APPLY_P10_REBUILD_RECONCILIATION
-```
+Every live execution also requires a persistent journal. Successful operation
+IDs are recorded; failed operations are not marked complete, so a sleepy device
+can be retried safely.
 
-## Corrected fresh-P10 pilot set
+v0.2 also:
+- fails closed on unresolved pilot selectors;
+- filters pilot group members to selected devices;
+- restores group friendly names with group/rename;
+- scopes group operations to related device restores only;
+- compares existing custom bindings before binding;
+- runs converter configure once per network/journal;
+- disables raw reporting replay;
+- treats reporting mismatches as explicit review/configure items;
+- fails non-zero if any MQTT operation fails;
+- verifies actual names/options/groups/bindings/reporting in status rather than
+  treating a successful interview as full restoration.
 
-| Device | IEEE | Role | Notes |
-|---|---|---|---|
-| `WRSocketWindowLeft` | `0xa4c138ef578c9f75` | Router | BSEED TS011F socket; Workroom naming set; member of group 31 |
-| `KitchenSocketRight` | `0xa4c138075cd16ed4` | Router | BSEED TS011F-BS-PM |
-| `HallBreakerFA5` | `0x94b216fffe9260f5` | Router | Tongou-style TS011F; description says dryer, phase A; reset only with dryer confirmed off |
-| `RODRET_Pilot_A` | `0x348d13fffefffa53` | EndDevice | Previous production interview failed |
-| `RODRET_Pilot_B` | `0x08fd52fffed5864e` | EndDevice | Previous production interview succeeded and emitted an action |
-
-The earlier candidate `LivingRoomSocketTableLeft` was removed from the pilot:
-it is the wrong room. The HA inventory has no explicit area assigned to
-`WRSocketWindowLeft`, so its exact physical "table-left" position still needs
-visual confirmation before factory reset.
-
-The corrected pilot requires only one existing group:
-
-- group **31** — `Sockets Nonessential Shutdown`
-
-No pilot device has a custom non-coordinator binding in the current cold
-snapshot. The binding-replay path is nevertheless covered by synthetic tests
-because it is required for the later whole-network rebuild.
+The production cold bundle self-check reports 104/105 fully restored. The one
+non-pass is the RODRET that was already captured with an incomplete interview.
 
 ## Pilot acceptance gate
 
-Do not expand the rebuild simply because devices appear in Zigbee2MQTT.
+Before promotion require:
+1. genuinely clean P10 prejoin table state;
+2. all three pilot routers joined/interviewed and registered;
+3. both RODRETs joined/configured and repeatedly publishing actions;
+4. group 31 state restored where applicable;
+5. BSEED options/reporting behavior restored;
+6. repeated unicast commands pass;
+7. groupcast passes;
+8. at least one meaningful routed/multi-hop path passes;
+9. coordinator_check has no missing pilot router;
+10. stop/start Zigbee2MQTT once;
+11. all pilot devices return after restart;
+12. coordinator_check remains clean after restart;
+13. reconciler status confirms application-state restoration;
+14. no unexpected coordinator/address/security records appear.
 
-Require:
+Only after every gate passes does the same pilot network expand into production.
 
-1. all three pilot routers join and interview successfully;
-2. coordinator check shows all three correctly registered;
-3. both RODRETs join/configure and publish repeated real button actions;
-4. `WRSocketWindowLeft` is restored to exact group ID 31;
-5. its BSEED custom reporting option and device options are restored;
-6. repeated unicast control/read tests succeed;
-7. at least one RODRET is commissioned through a pilot router;
-8. arrange the routers so at least one useful test path exercises routing rather
-   than every device sitting directly beside the coordinator;
-9. no pilot router appears in `missing_routers`;
-10. reconciler status shows all five expected IEEE addresses recovered.
+## Remaining blocker: true P10 sanitation
 
-If this gate passes, keep the **same fresh network** and continue the house-wide
-rebuild; do not form another network.
+The standard zigbee-herdsman clear/recommission sequence demonstrably leaves
+extended address-manager records on this CC2674P10 firmware.
 
-If it fails, stop and restore the verified current P10 cold state. Any pilot
-device that was factory-reset must then be paired back to the restored network.
+A destructive NVRAM sanitizer is deliberately not implemented in this branch
+until the exact mechanism is validated for MR4U CC2674P10 revision 20260310.
+Potential zigpy-znp nvram_reset use must be preceded by compatibility review,
+low-level backup planning, and post-wipe evidence generation.
 
-## Full rebuild after a passing pilot
+Until then v0.2 intentionally refuses fresh commissioning.
 
-1. Pair mains-powered routers outward from the coordinator.
-2. Re-run coordinator check and representative command tests in small batches.
-3. Restore each joined IEEE's friendly name/options/group memberships.
-4. Replay now-satisfiable custom bindings; leave missing-target dependencies
-   deferred until their targets join.
-5. Add battery/end devices only after nearby router coverage is established.
-6. Re-enable HA discovery after names are stable and validate HA entities and
-   automations.
-7. Finish with groupcast, multi-hop and normal-use validation for at least
-   24 hours.
+## Intentionally manual / review-only
 
-## What cannot be automated safely
-
-- physically factory-resetting/waking devices;
-- deciding whether an attached socket/breaker load is safe to interrupt;
-- proving physical room/location purely from Zigbee metadata;
-- resolving unsupported manufacturer-specific binding clusters without review;
-- guaranteeing Home Assistant entity continuity without post-rejoin validation.
+- physically factory-resetting or waking devices;
+- deciding whether a breaker/socket load is safe to interrupt;
+- manufacturer-specific reporting recreation when metadata is incomplete;
+- raw P10 NVRAM wipe before its toolchain is separately validated;
+- claiming Home Assistant entity continuity without post-join validation.
