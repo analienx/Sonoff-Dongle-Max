@@ -6,7 +6,7 @@
 after devices are physically reset and commissioned onto a **fresh**
 MR4U CC2674P10 / Z-Stack network.
 
-Tool version: **0.1.0**
+Tool version: **0.1.1**
 
 It intentionally does **not** copy network keys, PAN/extPAN, Trust Center keys,
 frame counters or coordinator NVRAM into the rebuild manifest.
@@ -34,6 +34,8 @@ Captured/restorable application state:
 - Raw reporting replay is opt-in; converter configuration is preferred first.
 - Keep Home Assistant discovery disabled while names are being reconstructed,
   then re-enable it once device identities are stable.
+- A temporary non-default MQTT base topic is supported and recommended for the
+  pilot so fresh-network messages cannot collide with production topics.
 
 The current MQTT operations were checked against the Zigbee2MQTT documentation
 updated 2026-08-22: group creation/options/membership, device rename/options,

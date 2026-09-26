@@ -87,7 +87,7 @@ class RebuildReconcilerTests(TestCase):
         with TemporaryDirectory() as td:
             source = bundle(Path(td) / "source.zip")
             snap = tool.snapshot(source)
-        self.assertEqual(tool.VERSION, "0.1.0")
+        self.assertEqual(tool.VERSION, "0.1.1")
         self.assertFalse(snap["contains_network_secrets"])
         self.assertEqual(snap["groups"]["22"]["friendly_name"], "PilotLights")
         self.assertEqual(snap["groups"]["22"]["members"],
@@ -214,6 +214,12 @@ class RebuildReconcilerTests(TestCase):
                       if x["topic"].endswith("/reporting/configure"))
         self.assertEqual(report["payload"]["cluster"], 6)
         self.assertEqual(report["payload"]["attribute"], 0)
+
+
+    def test_remote_apply_supports_nondefault_base_topic(self):
+        compile(tool.REMOTE_APPLY, "<remote_apply>", "exec")
+        self.assertIn('base_topic', tool.REMOTE_APPLY)
+        self.assertIn('topic.startswith("zigbee2mqtt/")', tool.REMOTE_APPLY)
 
     def test_apply_is_fail_closed_without_exact_phrase(self):
         with self.assertRaisesRegex(ValueError, "approval"):

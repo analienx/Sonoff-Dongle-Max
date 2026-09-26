@@ -21,7 +21,7 @@ from typing import Any
 import zipfile
 import yaml
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 FORMAT = "p10-z2m-rebuild-manifest-v1"
 PLAN_FORMAT = "p10-z2m-rebuild-plan-v1"
 APPLY_APPROVAL = "APPLY_P10_REBUILD_RECONCILIATION"
@@ -551,6 +551,8 @@ cfg=open("/homeassistant/zigbee2mqtt/configuration.yaml",encoding="utf-8").read(
 server=re.search(r"server:\s*mqtt://([^:/\s]+)(?::(\d+))?",cfg)
 user=re.search(r"^\s*user:\s*(\S+)",cfg,re.M)
 password=re.search(r"^\s*password:\s*(\S+)",cfg,re.M)
+base_topic_match=re.search(r"(?ms)^mqtt:\s*\n(?:(?:^[ \t]+.*\n)*)?^[ \t]+base_topic:\s*(\S+)",cfg)
+base_topic=base_topic_match.group(1) if base_topic_match else "zigbee2mqtt"
 if not server:
     print(json.dumps({"ok":False,"error":"mqtt server not found"})); sys.exit(2)
 base=["-h",server.group(1),"-p",server.group(2) or "1883"]
@@ -560,7 +562,10 @@ if user:
     base += ["-u",user.group(1),"-P",password.group(1)]
 results=[]
 for idx,op in enumerate(ops):
-    topic=op["topic"]; payload=dict(op["payload"]); tx=710000+idx; payload["transaction"]=tx
+    topic=op["topic"]
+    if topic.startswith("zigbee2mqtt/"):
+        topic=base_topic+"/"+topic[len("zigbee2mqtt/"):]
+    payload=dict(op["payload"]); tx=710000+idx; payload["transaction"]=tx
     response=topic.replace("/request/","/response/",1)
     sub=subprocess.Popen(["mosquitto_sub"]+base+["-t",response,"-C","1","-W","18"],
                          stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
