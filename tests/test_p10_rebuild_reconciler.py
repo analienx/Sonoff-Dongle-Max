@@ -153,7 +153,7 @@ class RebuildReconcilerTests(TestCase):
     def test_snapshot_preserves_application_state_and_network_fingerprint(self):
         with TemporaryDirectory() as td:
             snap = tool.snapshot(bundle(Path(td) / "source.zip"))
-        self.assertEqual(tool.VERSION, "0.2.0")
+        self.assertEqual(tool.VERSION, "0.2.1")
         self.assertFalse(snap["contains_network_secrets"])
         self.assertTrue(snap["source_network_fingerprint"])
         self.assertEqual(snap["groups"]["22"]["friendly_name"], "PilotLights")

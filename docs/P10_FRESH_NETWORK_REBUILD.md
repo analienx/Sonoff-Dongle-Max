@@ -2,7 +2,7 @@
 
 ## Status
 
-Tooling version: 0.2.0.
+Fresh-pilot state machine: 0.2.0. Reconciler: 0.2.1.
 
 The first v0.1 pilot attempt uncovered a critical CC2674P10/Z-Stack behavior:
 standard zigbee-herdsman recommissioning (STARTUP_OPTION=0x03 plus new PAN/key)

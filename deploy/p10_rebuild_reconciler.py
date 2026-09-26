@@ -22,9 +22,9 @@ from urllib.parse import urlparse
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from p10_rebuild_common import backup_network_fingerprint
+from p10_rebuild_common import backup_network_fingerprint, find_root
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 FORMAT = "p10-z2m-rebuild-manifest-v1"
 PLAN_FORMAT = "p10-z2m-rebuild-plan-v2"
 JOURNAL_FORMAT = "p10-z2m-rebuild-journal-v1"
@@ -1114,21 +1114,16 @@ def _broker_from_config(config: dict) -> tuple[dict, str]:
 
 def _load_live_backup_and_config(client) -> tuple[dict, dict]:
     sftp = client.open_sftp()
-    roots = ("/config/zigbee2mqtt", "/homeassistant/zigbee2mqtt")
-    found = []
-    for root in roots:
-        try:
-            with sftp.open(root + "/configuration.yaml", "rb") as stream:
-                cfg = yaml.safe_load(stream.read())
-            with sftp.open(root + "/coordinator_backup.json", "rb") as stream:
-                backup = json.loads(stream.read().decode("utf-8"))
-            if isinstance(cfg, dict) and isinstance(backup, dict):
-                found.append((cfg, backup))
-        except FileNotFoundError:
-            continue
-    if len(found) != 1:
-        raise RuntimeError("Unable to identify a unique live Zigbee2MQTT data root")
-    return found[0]
+    root = find_root(sftp)
+    with sftp.open(root + "/configuration.yaml", "rb") as stream:
+        cfg = yaml.safe_load(stream.read())
+    with sftp.open(root + "/coordinator_backup.json", "rb") as stream:
+        backup = json.loads(stream.read().decode("utf-8"))
+    if not isinstance(cfg, dict):
+        raise TypeError("Live Zigbee2MQTT configuration is not a mapping")
+    if not isinstance(backup, dict):
+        raise TypeError("Live coordinator backup is not a mapping")
+    return cfg, backup
 
 
 def apply(
