@@ -13,13 +13,22 @@ def addon_quiescent(client, info: dict | None = None) -> dict:
     state = details.get('state')
     if state not in ('stopped', 'error'):
         raise RuntimeError('Zigbee2MQTT Supervisor state is not stopped or error')
-    command = "docker inspect --format '{{.State.Running}}' app_" + ADDON
+    name = 'app_' + ADDON
+    command = "docker inspect --format '{{.State.Running}}' " + name
     _, output, _ = client.exec_command(command, timeout=15)
     raw = output.read().decode('utf-8', errors='replace').strip()
-    if output.channel.recv_exit_status() != 0 or raw not in ('true', 'false'):
-        raise RuntimeError('Cannot verify actual Zigbee2MQTT container state; refusing handoff')
-    if raw != 'false':
-        raise RuntimeError('Zigbee2MQTT container is running; refusing serial access')
+    status = output.channel.recv_exit_status()
+    if status == 0 and raw in ('true', 'false'):
+        if raw != 'false':
+            raise RuntimeError('Zigbee2MQTT container is running; refusing serial access')
+    else:
+        # HA may remove a stopped add-on container entirely. Accept absence only
+        # when an exact-name Docker lookup confirms no such container exists.
+        check = "docker ps -aq --filter name=^/" + name + "$"
+        _, listed, _ = client.exec_command(check, timeout=15)
+        matches = listed.read().decode('utf-8', errors='replace').strip()
+        if listed.channel.recv_exit_status() != 0 or matches:
+            raise RuntimeError('Cannot verify actual Zigbee2MQTT container state; refusing handoff')
     return {'addon_quiescent': True, 'supervisor_state': state,
             'addon_container_running': False,
             'crash_state_recovered_for_handoff': state == 'error'}
