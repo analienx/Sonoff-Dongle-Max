@@ -2,7 +2,7 @@ name: Build P009 MG24 firmware
 
 on:
   push:
-    branches: [p009-mg24-broadcast-headroom]
+    branches: [p009-mg24-broadcast-headroom, assistant/p009b-build-recovery-20260930]
     paths:
       - ".github/workflows/build-p009.yml"
       - "firmware/**"
@@ -47,49 +47,70 @@ jobs:
           repository: Nerivec/silabs-firmware-builder
           ref: 858c34b0eb6f53a2e0c89455ea489ceaa62d58db
           path: builder-p009
-      - name: Verify and patch source
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: NabuCasa/silabs-firmware-builder
+          # Exact head of NabuCasa/silabs-firmware-builder PR #214, merged upstream.
+          # Replaces the now-403 slt bootstrap with directly pinned dependencies.
+          ref: 9e7021458664028de119bfa11a8776628c4134c5
+          path: builder-tooling
+      - name: Verify, overlay fixed toolchain bootstrap, and patch source
         run: |
           set -euo pipefail
           test "$(git -C repo rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git -C builder-stock rev-parse HEAD)" = "858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
           test "$(git -C builder-p009 rev-parse HEAD)" = "858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
+          test "$(git -C builder-tooling rev-parse HEAD)" = "9e7021458664028de119bfa11a8776628c4134c5"
+          python3 repo/firmware/patch_builder_toolchain.py builder-stock builder-tooling
+          python3 repo/firmware/patch_builder_toolchain.py builder-p009 builder-tooling
           python3 repo/firmware/patch_builder.py builder-p009
+          git -C builder-stock diff --check
           git -C builder-p009 diff --check
+          grep -q -- '--repo-owner' builder-stock/tools/build_project.py
+          grep -q -- '--repo-hash' builder-stock/tools/build_project.py
       - name: Build pinned Silicon Labs toolchain container
         run: |
           set -euo pipefail
           docker build --pull -t p009-silabs-builder:9.1.1 builder-stock
           {
             echo "repo_commit=$GITHUB_SHA"
-            echo "builder_commit=858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
+            echo "builder_source_commit=858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
+            echo "builder_tooling_commit=9e7021458664028de119bfa11a8776628c4134c5"
+            echo "builder_tooling_origin=NabuCasa/silabs-firmware-builder#214"
             echo "docker_image_id=$(docker image inspect --format '{{.Id}}' p009-silabs-builder:9.1.1)"
             echo "docker_repo_digests=$(docker image inspect --format '{{json .RepoDigests}}' p009-silabs-builder:9.1.1)"
-            docker run --rm --entrypoint /bin/sh p009-silabs-builder:9.1.1 -lc '
+            docker run --rm --entrypoint /bin/sh p009-silabs-builder:9.1.1 -c '
               set -eu
-              export PATH=/root/.silabs/slt/bin:$PATH
+              export PATH=/opt/silabs/bin:$PATH
               printf "os_release="; tr "\n" ";" </etc/os-release; echo
-              printf "slc_version="; slc --version 2>&1 | head -1
+              slc_version=$(/opt/silabs/bin/slc --version 2>&1)
+              commander_version=$(/opt/silabs/bin/commander --version 2>&1)
+              printf "slc_version=%s\n" "$(printf "%s" "$slc_version" | head -1)"
               printf "cmake_version="; cmake --version | head -1
               printf "ninja_version="; ninja --version
-              printf "commander_version="; commander --version 2>&1 | head -1
-              gcc_root="$(slt where gcc-arm-none-eabi)"
-              test -n "$gcc_root" && test -x "$gcc_root/bin/arm-none-eabi-gcc"
+              printf "commander_version=%s\n" "$(printf "%s" "$commander_version" | head -1)"
+              gcc_root=/opt/toolchains/gcc-arm-none-eabi
+              test -x "$gcc_root/bin/arm-none-eabi-gcc"
               printf "gcc_root=%s\n" "$gcc_root"
               printf "gcc_version="; "$gcc_root/bin/arm-none-eabi-gcc" --version | head -1
+              test -d /opt/silabs/sdks/simplicity_sdk_2026.6.1
+              printf "sdk_root=%s\n" /opt/silabs/sdks/simplicity_sdk_2026.6.1
               /opt/venv/bin/python3 -c '"'"'import platform, importlib.metadata as m; print("python="+platform.python_version()); print("ruamel.yaml="+m.version("ruamel.yaml"))'"'"'
             '
           } | tee P009-TOOLCHAIN-EVIDENCE.txt
       - name: Compile stock rollback
         run: |
           set -euo pipefail
+          rm -rf builder-stock/build
           docker run --rm -v "$GITHUB_WORKSPACE/builder-stock:/repo" -w /repo p009-silabs-builder:9.1.1 \
-            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --output-dir outputs \
+            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --no-clean-build-dir --output-dir outputs \
             --output gbl --output hex --output out --repo-owner analienx --repo-hash stock911
       - name: Compile P009
         run: |
           set -euo pipefail
+          rm -rf builder-p009/build
           docker run --rm -v "$GITHUB_WORKSPACE/builder-p009:/repo" -w /repo p009-silabs-builder:9.1.1 \
-            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --output-dir outputs \
+            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --no-clean-build-dir --output-dir outputs \
             --output gbl --output hex --output out --repo-owner analienx --repo-hash p009b64m32
       - name: Capture generated build evidence
         run: |
