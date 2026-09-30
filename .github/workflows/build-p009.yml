@@ -61,15 +61,13 @@ jobs:
           test "$(git -C builder-stock rev-parse HEAD)" = "858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
           test "$(git -C builder-p009 rev-parse HEAD)" = "858c34b0eb6f53a2e0c89455ea489ceaa62d58db"
           test "$(git -C builder-tooling rev-parse HEAD)" = "9e7021458664028de119bfa11a8776628c4134c5"
-          for target in builder-stock builder-p009; do
-            cp builder-tooling/Dockerfile "$target/Dockerfile"
-            cp builder-tooling/pyproject.toml "$target/pyproject.toml"
-            cp builder-tooling/uv.lock "$target/uv.lock"
-            cp builder-tooling/tools/build_project.py "$target/tools/build_project.py"
-            cp builder-tooling/tools/create_gbl.py "$target/tools/create_gbl.py"
-          done
+          python3 repo/firmware/patch_builder_toolchain.py builder-stock builder-tooling
+          python3 repo/firmware/patch_builder_toolchain.py builder-p009 builder-tooling
           python3 repo/firmware/patch_builder.py builder-p009
+          git -C builder-stock diff --check
           git -C builder-p009 diff --check
+          grep -q -- '--repo-owner' builder-stock/tools/build_project.py
+          grep -q -- '--repo-hash' builder-stock/tools/build_project.py
       - name: Build pinned Silicon Labs toolchain container
         run: |
           set -euo pipefail
@@ -81,13 +79,14 @@ jobs:
             echo "builder_tooling_origin=NabuCasa/silabs-firmware-builder#214"
             echo "docker_image_id=$(docker image inspect --format '{{.Id}}' p009-silabs-builder:9.1.1)"
             echo "docker_repo_digests=$(docker image inspect --format '{{json .RepoDigests}}' p009-silabs-builder:9.1.1)"
-            docker run --rm --entrypoint /bin/sh p009-silabs-builder:9.1.1 -lc '
+            docker run --rm --entrypoint /bin/sh p009-silabs-builder:9.1.1 -c '
               set -eu
+              export PATH=/opt/silabs/bin:$PATH
               printf "os_release="; tr "\n" ";" </etc/os-release; echo
-              printf "slc_version="; slc --version 2>&1 | head -1
+              printf "slc_version="; /opt/silabs/bin/slc --version 2>&1 | head -1
               printf "cmake_version="; cmake --version | head -1
               printf "ninja_version="; ninja --version
-              printf "commander_version="; commander --version 2>&1 | head -1
+              printf "commander_version="; /opt/silabs/bin/commander --version 2>&1 | head -1
               gcc_root=/opt/toolchains/gcc-arm-none-eabi
               test -x "$gcc_root/bin/arm-none-eabi-gcc"
               printf "gcc_root=%s\n" "$gcc_root"
