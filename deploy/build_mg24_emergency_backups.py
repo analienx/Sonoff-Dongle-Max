@@ -15,8 +15,10 @@ from typing import Any
 
 LEASE_DEFAULT = 10_000_000
 EXPECTED_P009_BYTES = 268_992
-EXPECTED_P009_SHA256 = "a7747b396201d37da9073eaf81b599734684259debb78616b1fa3924fdac3fe8"
+# Preferred hardened P009b: RX512/BTT64/KEY12/multicast32, run 36776971112.
+EXPECTED_P009_SHA256 = "e3dc4849ae840d54a6cdfe6b8346fef2b37d36d24e0206c0041211bd88be8ef6"
 EXPECTED_ROLLBACK_BYTES = 268_896
+# New build is byte-identical to the historically accepted stock rollback.
 EXPECTED_ROLLBACK_SHA256 = "b88a7786741dea5661a1299fd0f650c692ad6a00d8fbd0e76848de8a638daaef"
 
 class PlanError(RuntimeError):

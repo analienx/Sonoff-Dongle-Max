@@ -17,9 +17,26 @@ The accepted P009 artifact is pinned by historical deployment issue #6:
   `b88a7786741dea5661a1299fd0f650c692ad6a00d8fbd0e76848de8a638daaef`
 
 The exact accepted P009 binary above is RX512, broadcast64, key12, multicast26,
-route254, source-route254, and neighbor26. A later `p009-hardening` source profile
-promoted multicast to 32, but that is **not** the hash-pinned production-accepted binary
-used by this emergency plan.
+route254, source-route254, and neighbor26. It remains a historical known-good fallback.
+
+The **preferred recovery candidate is now P009b**, built and fully verified from the
+`p009-hardening` line after repairing only the obsolete Silicon Labs tool-bootstrap
+path:
+
+- source commit: `f9abcba2b4e4c215bfdc57080e58b079c1eb63a9`
+- Actions run: `36776971112`
+- P009b GBL: 268992 bytes, SHA256
+  `e3dc4849ae840d54a6cdfe6b8346fef2b37d36d24e0206c0041211bd88be8ef6`
+- matched stock rollback: 268896 bytes, SHA256
+  `b88a7786741dea5661a1299fd0f650c692ad6a00d8fbd0e76848de8a638daaef`
+- the rebuilt stock rollback is **byte-for-byte identical** to the historical accepted
+  rollback, providing an independent reproducibility check on the repaired builder
+- linked evidence validates `.bss` delta +728 bytes and the intended
+  RX512/broadcast64/key12/multicast32/route254/source-route254 profile
+
+P009b is therefore the artifact pinned by the current recovery planner. The older
+`a7747b...` P009 remains retained as a conservative historical fallback, not the
+preferred new recovery image.
 
 Historical production Ember backups for this exact network from Aug 29 through Sep 24
 all carry the same Ember `hashed_tclk` and have `devices: []`. The network nevertheless
