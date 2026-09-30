@@ -102,19 +102,30 @@ neighbor churn while the 254-entry source-route table retained ample headroom.
 
 For the first MG24 boot:
 
+- start with **at most 24 powered router candidates**, so the 26-entry direct-neighbor
+  table cannot reach 26/26 even if every powered router is in direct RF range;
 - keep essential hardwired breakers/switches and geographically useful anchors powered;
 - temporarily power down redundant mains sockets that historically competed heavily for
   direct-neighbor slots;
+- admit only devices that **secure-rejoin without a factory reset or new pairing**;
+- if a candidate does not rejoin by itself, leave it offline during the reversible trial;
 - target **direct-neighbor occupancy below 26 with materially lower churn**, not simply
   "30 Router records";
-- add powered routers back in small batches only after a stable checkpoint.
+- after a stable checkpoint, add four candidates to reach at most 28 powered routers,
+  then add at most two per checkpoint while observing occupancy/churn.
+
+The exact candidate list is operational evidence, not membership filtering: all original
+devices stay in the Zigbee2MQTT database and in the full P10 rollback backup.
 
 ## Hard cutover invariants
 
 - exactly one coordinator/Z2M owner;
 - P10 physically/logically isolated before MG24 uses the copied coordinator IEEE;
-- exact P009 artifact and matched rollback available and hash-verified;
-- no NVM erase/factory reset;
+- exact P009/P009b artifact and matched rollback available and hash-verified;
+- no NVM erase/factory reset and no new device pairing during the reversible trial;
+- do not flash router→end-device/client role conversions while rollback-to-P10 is required;
+- any device that would require a reset/re-pair on MG24 remains offline until the
+  coordinator decision is final;
 - coordinator IEEE must match the existing network;
 - PAN/extPAN/channel/network-key fingerprint must match;
 - keep the production `database.db` and friendly-name configuration;
