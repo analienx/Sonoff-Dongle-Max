@@ -252,3 +252,9 @@ Current hardening work is performed on `p009-hardening`. Production flashing rem
 ## Canonical Home Assistant diagnostics and Zigbee device identification
 
 For any live Home Assistant access, Zigbee2MQTT NWK/address mapping or route-error investigation, load the **single canonical** [Home Assistant read-only skill](https://github.com/analienx/config/blob/main/skills/home-assistant-readonly/SKILL.md) from `analienx/config` (main). It provides the existing SSH alias, a host-key-verified Paramiko fallback for Windows OpenSSH exit-255 failures, and the reusable `ha_readonly.py` live inventory helper. Keep implementation and credentials in the canonical location; do not copy the helper or SSH settings here. This does not authorize Zigbee firmware flashing, HA mutations or bypass of this repository's own safety/deployment rules.
+
+## Emergency MG24 fallback
+
+A reversible, offline-planned P10/Z-Stack → previously accepted SONOFF MG24/P009
+emergency fallback is documented in [docs/MG24-EMERGENCY-FALLBACK.md](docs/MG24-EMERGENCY-FALLBACK.md).
+The planner only creates private backup candidates; it does not flash hardware or mutate Home Assistant.
