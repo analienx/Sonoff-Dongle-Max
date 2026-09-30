@@ -62,6 +62,12 @@ def patch_dockerfile(text: str) -> str:
     ]
     for old, new, label in replacements:
         text = replace_once(text, old, new, label)
+    text = replace_once(
+        text,
+        """       libpcre2-16-0 \\\n       libglib2.0-0 \\\n       # Needed at runtime by the zstd-enabled cc1/cc1plus/lto1 swapped in below (ARM64)\n""",
+        """       libpcre2-16-0 \\\n       libglib2.0-0 \\\n       libdbus-1-3 \\\n       # Needed at runtime by the zstd-enabled cc1/cc1plus/lto1 swapped in below (ARM64)\n""",
+        "commander dbus runtime dependency",
+    )
     return text
 
 def patch_build_project(text: str) -> str:
