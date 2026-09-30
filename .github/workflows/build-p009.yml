@@ -101,14 +101,16 @@ jobs:
       - name: Compile stock rollback
         run: |
           set -euo pipefail
+          rm -rf builder-stock/build
           docker run --rm -v "$GITHUB_WORKSPACE/builder-stock:/repo" -w /repo p009-silabs-builder:9.1.1 \
-            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --output-dir outputs \
+            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --no-clean-build-dir --output-dir outputs \
             --output gbl --output hex --output out --repo-owner analienx --repo-hash stock911
       - name: Compile P009
         run: |
           set -euo pipefail
+          rm -rf builder-p009/build
           docker run --rm -v "$GITHUB_WORKSPACE/builder-p009:/repo" -w /repo p009-silabs-builder:9.1.1 \
-            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --output-dir outputs \
+            --manifest manifests/sonoff/sonoff_dongle-m_zigbee_ncp.yaml --build-dir build --no-clean-build-dir --output-dir outputs \
             --output gbl --output hex --output out --repo-owner analienx --repo-hash p009b64m32
       - name: Capture generated build evidence
         run: |
