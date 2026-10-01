@@ -1,0 +1,154 @@
+---
+name: p10-zstack-restore-recovery
+description: CC2674P10/Z-Stack 3 existing-network recovery when a validated coordinator restore succeeds but the radio hangs or disappears during the final startupFromApp transition.
+---
+
+# CC2674P10 Z-Stack restore recovery — resume the restored network, do not reform it
+
+Use this skill for SMLIGHT/other CC2674P10 coordinators when an existing Zigbee network has already been restored into Z-Stack NVRAM, identity/security tables validate, but the coordinator fails specifically at the final network-start transition. The canonical cross-project migration policy remains `analienx/config:skills/zigbee-coordinator-migration/SKILL.md`; this file is the P10-specific implementation specialization.
+
+## Known failure signature
+
+The recovery finding confirmed on 2026-10-01 is narrow and important:
+
+- coordinator backup parsing/restore succeeds;
+- PAN ID, extended PAN ID, channel, coordinator IEEE, network key and restored security records are present as expected;
+- a soft reset succeeds and the radio still answers normal ZNP requests;
+- Zigbee2MQTT/zigbee-herdsman then calls `ZDO_STARTUP_FROM_APP`;
+- the CC2674P10 stops responding or fails to reach coordinator state during that transition;
+- replacing that post-restore transition with `APP_CNF_BDB_START_COMMISSIONING(mode=0x00)` allows the restored network to resume on the affected P10.
+
+Treat this as a recovery path for this exact failure class, not as a blanket replacement for every healthy Z-Stack startup.
+
+Current zigbee-herdsman restore flow writes the restored NVRAM, resets, and then calls `beginStartup()`, which uses `ZDO_STARTUP_FROM_APP` when the adapter is not already `ZB_COORD`. TI BDB guidance distinguishes network formation from initialization/resumption of an already restored network. Do not silently convert a restored-network recovery into a new formation attempt.
+
+References:
+- zigbee-herdsman Z-Stack manager: https://github.com/Koenkk/zigbee-herdsman/blob/master/src/adapter/z-stack/adapter/manager.ts
+- TI BDB discussion covering restored-network initialization and `BDB_COMMISSIONING_NETWORK_RESTORED`: https://e2e.ti.com/support/wireless-connectivity/zigbee-thread-group/zigbee-and-thread/f/zigbee-thread-forum/1126199/launchxl-cc26x2r1-app_cnf_bdb_commissioning_notification-0x08-bdb_commissioning_formation_failure
+- zigpy-znp ZNP/NVRAM implementation: https://github.com/zigpy/zigpy-znp/blob/dev/zigpy_znp/api.py
+
+## Non-negotiable invariants
+
+1. Exactly one coordinator carrying the production PAN/extended PAN/network key/IEEE may be powered as an active Zigbee coordinator.
+2. Preserve the untouched source coordinator and all verified cold backups until production acceptance is complete.
+3. Do not change PAN ID, extended PAN ID, channel, network key or coordinator IEEE as a workaround.
+4. Do not delete `database.db` or `coordinator_backup.json` to force a clean start.
+5. Do not mass reset/re-pair devices while this startup failure remains unresolved.
+6. Preserve a transmit frame counter safely above the highest counter already emitted by any coordinator that has carried this network identity.
+7. Never use BDB `mode=0x04` (network formation) as the recovery action for the already restored production network.
+8. Python/direct protocol libraries are preferred. Raw MT bytes are diagnostic reference only; do not build the recovery around ad-hoc terminal byte injection when a typed ZNP call is available.
+
+## Recovery decision gate
+
+Before changing startup behavior, prove that the failure is after restore rather than during restore.
+
+Capture/read back, without printing secrets:
+
+- `SYS_PING` and `SYS_VERSION`;
+- `UTIL_GET_DEVICE_INFO` state;
+- `STARTUP_OPTION`;
+- `BDBNODEISONANETWORK` if available on the target firmware;
+- `NIB` including PAN ID, extended PAN ID, logical channel, network state/update ID;
+- `HAS_CONFIGURED_ZSTACK3`;
+- active and alternate network-key descriptors by fingerprint only;
+- network security material/frame counter;
+- address/security/TCLK table capacities and populated-entry counts;
+- restored device/link-key counts;
+- effective coordinator IEEE.
+
+If identity, key fingerprints, table counts or counter state do not match the intended backup, STOP. Fix the restore evidence first. The BDB resume path must not be used to hide a malformed restore.
+
+## Preferred P10 resume sequence
+
+With Zigbee2MQTT stopped and every other copied coordinator physically isolated:
+
+1. Complete the already-reviewed restore of the intended network into P10 NVRAM.
+2. Read back the restored identity/security state and record redacted fingerprints/counts.
+3. Soft-reset the P10.
+4. Reconnect to ZNP and verify `SYS_PING` before any network-start command.
+5. Do **not** call `ZDO_STARTUP_FROM_APP` for the affected failure signature.
+6. Send `APP_CNF_BDB_START_COMMISSIONING` with `mode=0x00`.
+7. Observe callbacks/state transitions rather than treating the SRSP alone as success.
+8. Require coordinator state (`ZDO_STATE_CHANGE_IND = 0x09` / StartedAsCoordinator) and, when emitted by the firmware, BDB status `0x0D` (`BDB_COMMISSIONING_NETWORK_RESTORED`).
+9. Immediately verify the radio still answers `SYS_PING`, then re-read NIB/network identity and security counter state.
+10. Cold power-cycle the P10 once while the old coordinator remains isolated, reconnect, and prove the same coordinator/network state survives.
+11. Only after these gates pass may Zigbee2MQTT become the radio client.
+
+A raw MT reference for `APP_CNF_BDB_START_COMMISSIONING(mode=0x00)` may be used only to verify framing during protocol debugging:
+
+```text
+request:  FE 01 2F 05 00 2B
+expected SRSP status byte: success
+```
+
+Do not treat that SRSP as the acceptance gate; the state-change/BDB notification and post-command liveness are the important evidence.
+
+## Prevent Zigbee2MQTT from repeating the failing restore/start loop
+
+Before starting Zigbee2MQTT after a successful manual recovery, ensure the P10 already represents the intended configured network:
+
+- `HAS_CONFIGURED_ZSTACK3` is set correctly;
+- NIB PAN/extended PAN/channel match the Zigbee2MQTT configuration;
+- active/alternate network-key fingerprints match;
+- the effective coordinator IEEE is correct;
+- the adapter is already in coordinator state;
+- `coordinator_backup.json` and `database.db` remain preserved.
+
+The desired first application start is a **resume/attach to an already running restored coordinator**, not another destructive restore attempt. Inspect the first logs. If herdsman decides to restore/recommission again, STOP and diagnose the strategy mismatch rather than allowing another blind cycle.
+
+## If BDB mode 0x00 does not recover the P10
+
+Do not jump to hardware replacement or mass re-pairing. Escalate in this order:
+
+### Lane A — independent NVRAM writer
+
+Use a clean, separately reviewed `zigpy-znp` restore path to write the same intended network state. This is valuable because its NVRAM serialization and migration handling differ from zigbee-herdsman. After write/reset, apply the same readback and BDB-resume gates above.
+
+A CC2674P10 community case has demonstrated that `zigpy radio znp restore` can restore PAN/extended PAN/channel/IEEE/network key and return existing devices without re-pairing. That does not prove every P10 network is healthy afterward; run the full acceptance suite.
+
+### Lane B — differential NVRAM restore
+
+If an independent writer also fails, isolate the offending NVRAM class instead of changing network identity:
+
+1. identity/NIB + network key + security material/frame counter;
+2. add TCLK seed;
+3. add address manager entries;
+4. add security manager/APS key data;
+5. add TCLK/device/child state.
+
+After each layer: reset → BDB mode 0x00 → coordinator state → ping → readback.
+
+If a layer introduces the failure, binary-search entries within that layer. Look for invalid/duplicate address-manager rows, inconsistent AMI/key references, TCLK seed/shift issues, malformed device records or table-layout/firmware incompatibilities.
+
+## Acceptance after the P10 boots
+
+Booting is necessary but not sufficient. Before declaring recovery complete, measure the actual production network:
+
+- fresh inbound reports across representative routers/end devices;
+- outbound unicast;
+- groupcast;
+- metering;
+- important Home Assistant automations;
+- controlled join/rejoin;
+- offline-device rate;
+- `MAC_NO_ACK`, `NWK_NO_ROUTE`, many-to-one/source-route failures over comparable windows;
+- adapter liveness/restarts and Zigbee2MQTT process health.
+
+Do not dismiss sustained route failures merely because the coordinator is online. Conversely, do not revert a proven P10 startup recovery merely because unrelated historical route counters exist; compare equivalent windows and functional behavior.
+
+## Evidence and handoff
+
+Record only redacted/fingerprinted evidence in Git:
+
+- firmware revision and Z-Stack version;
+- restore writer/version;
+- device/link-key counts;
+- table capacities/populated counts;
+- coordinator state transitions;
+- whether `startupFromApp` was skipped;
+- BDB mode/status;
+- liveness/readback before and after cold boot;
+- acceptance metrics;
+- exact failure point if a gate fails.
+
+Never publish the real network key, coordinator/device IEEE inventory, private backup, HA add-on options or secret-bearing NVRAM dumps.
