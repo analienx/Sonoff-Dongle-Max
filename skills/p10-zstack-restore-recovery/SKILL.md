@@ -1,6 +1,6 @@
 ---
 name: p10-zstack-restore-recovery
-description: CC2674P10/Z-Stack 3 existing-network recovery when a validated coordinator restore succeeds but the radio hangs or disappears during the final startupFromApp transition.
+description: CC2674P10/Z-Stack 3 existing-network recovery when a validated coordinator restore succeeds but the radio hangs during final startup or the MR4U USB/UART bridge becomes one-way or unresponsive.
 ---
 
 # CC2674P10 Z-Stack restore recovery — resume the restored network, do not reform it
@@ -95,6 +95,77 @@ Before starting Zigbee2MQTT after a successful manual recovery, ensure the P10 a
 - `coordinator_backup.json` and `database.db` remain preserved.
 
 The desired first application start is a **resume/attach to an already running restored coordinator**, not another destructive restore attempt. Inspect the first logs. If herdsman decides to restore/recommission again, STOP and diagnose the strategy mismatch rather than allowing another blind cycle.
+
+## Post-restore transport failure on PoE-powered MR4U
+
+A successful network restore and a healthy USB enumeration do **not** prove that the P10 command path is usable. A confirmed 2026-10-01 failure mode on an MR4U powered by PoE presented as a one-way bridge:
+
+- the MR4U enumerated normally as its USB device identity and exposed both CDC ACM interfaces;
+- the P10-facing interface could be opened at the expected baud rate;
+- valid unsolicited ZNP frames such as `ZDO srcRtgInd` arrived from the radio, proving **P10 → host** transport and live Zigbee RF reception;
+- `SYS_PING` requests from the host received no SRSP, and Zigbee2MQTT failed with `SRSP - SYS - ping after 6000ms`;
+- a normal ZNP `SYS_RESET_REQ(type=SOFT)` produced no reset response and did not restore command traffic;
+- restarting Home Assistant did not fix the condition because the MR4U itself remained powered through PoE.
+
+Treat this as a **transport/bridge state failure**, not as evidence that the restored NVRAM or backup is wrong.
+
+### Diagnose directionality before rewriting anything
+
+With Zigbee2MQTT stopped:
+
+1. Confirm the expected persistent `/dev/serial/by-id` path resolves to the intended P10 CDC ACM interface.
+2. Inspect `dmesg` for the physical USB path, not only tty names. Distinguish:
+   - normal enumeration followed by a bare `USB disconnect`;
+   - explicit host `reset ... using xhci-hcd`;
+   - descriptor errors such as `-71`;
+   - hub disable/over-current messages.
+3. Check sysfs port state, `disable`, and `over_current_count`. Do not infer over-current from a disconnect when the counter remains zero.
+4. Send a read-only `SYS_PING`.
+5. If `SYS_PING` times out, capture incoming MT traffic for several seconds before concluding the radio is dead.
+6. If valid unsolicited ZNP frames arrive while all host-originated SREQs time out, classify the condition as **one-way radio→host transport**.
+7. Do not repeat restore, erase NVRAM, change PAN/channel/key/IEEE, or mass re-pair devices merely to cure this symptom.
+
+A phone drawing charge current from a USB port is not a valid USB-data test. A charge-only or damaged cable can provide VBUS with no D+/D− data path. When testing the HA port, use a known data-capable device/cable and require an actual kernel USB attach/enumeration event.
+
+### HA reboot is not an MR4U reboot when PoE remains present
+
+On a PoE-powered MR4U used in USB communication mode, restarting or even power-cycling the Home Assistant host can leave the MR4U ESP32-S3/USB↔UART bridge continuously powered. Therefore a bridge latch can survive the HA restart.
+
+When the one-way transport signature above is proven, perform a **true MR4U cold power-cycle** while Zigbee2MQTT is stopped:
+
+1. disconnect the MR4U USB cable;
+2. remove PoE/power so the MR4U has no remaining power source;
+3. allow the unit to become fully unpowered;
+4. restore PoE/power and let the MR4U boot;
+5. reconnect USB;
+6. wait for the stable by-id P10 interface;
+7. require a successful `SYS_PING` before starting Zigbee2MQTT.
+
+In the confirmed incident, the first post-power-cycle pings could still time out during early boot; a valid ping response appeared a few seconds later. Do not declare failure on the first immediate probe if USB has only just enumerated.
+
+Only after bidirectional ZNP traffic is restored should Zigbee2MQTT be started again. If Zigbee2MQTT then passes adapter initialization and resumes publishing live production-device traffic, keep the restored NVRAM intact.
+
+### USB topology and unrelated peripheral faults
+
+Linux bus numbers are not interchangeable with physical labels such as “USB2 port” and “USB3 port.” Map the actual device to its xHCI controller and physical path. Two low/full-speed USB devices may sit on different xHCI controllers even though both are using USB 2 signaling.
+
+If another peripheral reports errors such as `disabled by hub (EMI?), re-enabling...`, record it, but do not automatically attribute the coordinator failure to that device when it is on a different xHCI controller. Isolate one variable at a time.
+
+For Zigbee coordinators, prefer USB 2 signaling/ports where practical to reduce 2.4 GHz interference from USB 3 SuperSpeed activity, but still diagnose the observed physical path rather than relying on port color or assumptions.
+
+### Return diagnostics to production settings
+
+During recovery it is reasonable to set the Zigbee2MQTT add-on to manual boot and temporarily enable narrow debug namespaces. Before closing the incident:
+
+- restore add-on boot policy to its intended production value (normally automatic for an always-on coordinator);
+- preserve the prior watchdog policy unless there is a separate reason to change it;
+- set `advanced.log_level: info`;
+- inspect `advanced.log_namespaced_levels`: a global `info` does **not** suppress namespaces explicitly pinned to `debug`;
+- change temporary namespace-level `debug` overrides back to `info`;
+- keep `log_debug_to_mqtt_frontend: false` unless debug forwarding is explicitly needed;
+- restart Zigbee2MQTT once and verify new log timestamps contain no debug flood.
+
+Do not confuse old debug lines retained in the add-on log with logging from the newly restarted process; compare timestamps/container start time.
 
 ## If BDB mode 0x00 does not recover the P10
 
