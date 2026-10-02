@@ -1,0 +1,78 @@
+name: T832 toolchain probe
+
+on:
+  push:
+    branches:
+      - exp/mr4u-p10-ti832-kctrl-r0
+    paths:
+      - ".github/workflows/t832-build.yml"
+      - "firmware/t832/**"
+      - "docs/T832*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t832-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  toolchain-probe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install CCS 12.8.0 SimpleLink toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl tar xz-utils \
+            libc6-i386 libusb-0.1-4 libncurses5 libtinfo5 \
+            libx11-6 libxext6 libxrender1 libxtst6 libxi6 libxt6 libxinerama1 \
+            libgtk2.0-0 libnss3 xvfb
+
+          mkdir -p "$HOME/ti/downloads"
+          cd "$HOME/ti/downloads"
+          CCS_TARBALL=CCS12.8.0.00012_web_linux-x64.tar.gz
+          CCS_URL=https://dr-download.ti.com/software-development/ide-configuration-compiler-or-debugger/MD-J1VdearkvK/12.8.0/${CCS_TARBALL}
+          curl -fL --retry 5 --retry-delay 2 -o "$CCS_TARBALL" "$CCS_URL"
+          tar xzf "$CCS_TARBALL"
+          cd CCS12.8.0.00012_web_linux-x64
+          chmod +x ccs_setup_12.8.0.00012.run
+          ./ccs_setup_12.8.0.00012.run \
+            --mode unattended \
+            --enable-components PF_CC2X \
+            --prefix "$HOME/ti/ccs1280"
+
+      - name: Verify exact T832 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== CCS tree ==="
+          find "$HOME/ti/ccs1280" -maxdepth 4 -type d \
+            \( -name 'ti-cgt-armllvm*' -o -name 'sysconfig_*' -o -name 'xdctools_*' \) -print | sort
+
+          TIARMCLANG=$(find "$HOME/ti/ccs1280" -type f -name tiarmclang -perm -u+x -print -quit)
+          test -n "$TIARMCLANG"
+          echo "TIARMCLANG=$TIARMCLANG"
+          "$TIARMCLANG" --version
+
+          SYSCONFIG=$(find "$HOME/ti/ccs1280" -type f -name sysconfig_cli.sh -print -quit)
+          test -n "$SYSCONFIG"
+          echo "SYSCONFIG=$SYSCONFIG"
+          "$SYSCONFIG" --help | head -40 || true
+
+          XDC=$(find "$HOME/ti/ccs1280" -type d -name 'xdctools_3_62_01_15_core' -print -quit)
+          test -n "$XDC"
+          echo "XDC=$XDC"
+
+          "$TIARMCLANG" --version | grep -F 'TI Clang' || "$TIARMCLANG" --version
+          test "$(basename "$(dirname "$(dirname "$TIARMCLANG")")")" = "ti-cgt-armllvm_3.2.2.LTS" \
+            || test "$(basename "$(dirname "$(dirname "$TIARMCLANG")")")" = "ti-cgt-armllvm_3.2.2.LTS-0" \
+            || { echo "Unexpected TI ARM Clang installation"; exit 1; }
+
+          echo "toolchain_probe=PASS" >> "$GITHUB_STEP_SUMMARY"
