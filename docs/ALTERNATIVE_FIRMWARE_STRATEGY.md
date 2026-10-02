@@ -688,3 +688,108 @@ targeted fix
 ```
 
 That sequence maximizes information from every production flash and minimizes the chance of “fixing” the symptom while losing the root cause.
+
+
+---
+
+# 22. Escape from Z-Stack entirely
+
+The T830/T832 control path is the best near-term engineering route because it preserves the current network and gives us source-level control, but it still runs Z-Stack.
+
+A separate long-term track should therefore exist for **changing the Zigbee stack itself**.
+
+## 22.1 TI F3 / ZBOSS
+
+TI's newer SimpleLink Low Power F3 Zigbee solution uses ZBOSS on CC23xx / CC27xx. TI has publicly confirmed that the older F2 family remains Z-Stack-based.
+
+This is the cleanest future TI-family escape from the F2/Z-Stack architecture.
+
+Current blockers for this production network:
+
+- CC2674P10 itself is an F2/Z-Stack target, not an F3/ZBOSS target;
+- Zigbee2MQTT currently marks ZBOSS adapter support experimental;
+- documented ZBOSS adapter support currently focuses on Nordic nRF52 and ESP32-C6/H2 NCP firmware;
+- Zigbee2MQTT currently lacks ZBOSS coordinator backup/restore support;
+- documented missing functions include install-code support, Inter-PAN and channel changes without re-pairing.
+
+Therefore do not treat ZBOSS as an immediate migration target for the existing ~100-device production network.
+
+### Re-evaluation gate
+
+Re-open this track when all are true:
+
+- production-supported ZBOSS coordinator hardware/firmware exists with sufficient large-network capacity;
+- Zigbee2MQTT ZBOSS adapter is no longer experimental for our required features;
+- coordinator backup/restore is supported;
+- security/network identity migration can be tested without mass re-pairing;
+- large-network routing/neighbor behavior can be demonstrated under a topology comparable to ours.
+
+At that point perform a second-network soak before production migration.
+
+## 22.2 Raw IEEE 802.15.4 coprocessor + host Zigbee stack
+
+The CC2674P10 radio hardware supports IEEE 802.15.4, so a theoretically cleaner architecture is:
+
+```
+P10: RF + MAC / thin RCP
+Host: NWK + APS + ZDO + Trust Center + routing + coordinator state
+```
+
+This removes embedded Z-Stack/ZNP from the P10.
+
+Advantages:
+
+- host-side memory and observability;
+- no opaque embedded Zigbee routing/resource tables;
+- state can be persisted and inspected on the host;
+- coordinator crashes become ordinary host-process failures rather than radio-NVM failures;
+- easier instrumentation and recovery.
+
+But this is not a firmware tweak. It is effectively a new coordinator stack.
+
+Required work includes:
+
+- raw 802.15.4/RCP protocol;
+- herdsman adapter;
+- Zigbee PRO NWK implementation/integration;
+- APS;
+- ZDO;
+- Trust Center/security;
+- source routing;
+- commissioning;
+- Green Power;
+- inter-PAN;
+- backup/restore;
+- compatibility testing.
+
+TI 15.4-Stack does not replace these Zigbee layers.
+
+Treat this only as a research architecture unless an existing portable host Zigbee stack can be integrated cleanly.
+
+## 22.3 Decision
+
+Near term:
+
+```
+20240716 baseline
+-> T830-KCTRL
+-> T832-KCTRL
+-> diagnose/fix
+```
+
+Medium/long term:
+
+```
+monitor F3/ZBOSS maturity
+-> lab second network
+-> migration only after backup/security support is production-grade
+```
+
+Research-only maximum-control path:
+
+```
+raw 802.15.4 RCP
+-> host-side Zigbee coordinator stack
+```
+
+Do not mix the non-Z-Stack research track into the current production recovery experiments.
