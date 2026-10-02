@@ -113,3 +113,32 @@ The sanitized, rerunnable measuring tool is `deploy/p10_nv_lengths.py`; run it *
 **Private, current HA inventory (2026-09-23)** counted 61 Routers + 45 EndDevices + 1 Coordinator = 107 Zigbee2MQTT database records. The live Ember `coordinator_backup.json` exported by zigbee-herdsman@10.9.1 includes *zero* `devices` records, despite 106 non-coordinator database devices; an older local repo copy included only 22 devices and must not be used as current demand. The live file's network-level backup data and frame-counter field were present, but its zero-length per-device list is **not** evidence that there are zero Trust Center link keys in production, nor proof that all 106 will reconnect after Ember→ZStack. Do not publish raw backup, keys, IEEE addresses or private paths.
 
 **Remaining go/no-go gates:** (1) exact-running-firmware evidence of `MAX_NEIGHBOR_ENTRIES`, child/association, NWK routing and source-routing allocation and behavior beyond 26; (2) actual MR4U address manager and APS security manager capacities when initialized; (3) cross-stack Ember→ZStack security state and IEEE identity/counter preservation with verified rollback; (4) matched real-network application-command, groupcast and route-error acceptance after controlled cutover. `400 TCLK NV slots` clears one *provisioning* concern but must not set an overall migration PASS.
+
+
+## Post-flash quarantine gate
+
+After changing MR4U/CC2674P10 coordinator firmware, do **not** immediately start Zigbee2MQTT.
+
+Use `deploy/p10_postflash_quarantine_preflight.py` while the P10 is still isolated from Zigbee2MQTT. The tool is read-only and fail-closed:
+
+- verifies the SLZB-OS-reported radio revision;
+- verifies ZNP responsiveness and records `SYS_VERSION`;
+- compares stored coordinator IEEE / PAN / extended PAN / channel with a verified private backup;
+- probes Trust Center table capacity using `SYS.NVLength` only;
+- never prints network/link keys;
+- never forms or starts a Zigbee network;
+- returns one of `PASS_QUARANTINE`, `NEEDS_EXPLICIT_RESTORE`, or `STOP`.
+
+Example:
+
+```bash
+python deploy/p10_postflash_quarantine_preflight.py \
+  --host 192.168.50.200 \
+  --port 7638 \
+  --expected-revision 20240716 \
+  --expected-backup <private-fresh-coordinator-backup.json>
+```
+
+For the current production network, the default TCLK capacity gate probes slot 127, which proves at least 128 provisioned slots without reading any key bytes. The current fresh backup contains 101 link-key records.
+
+If the result is `NEEDS_EXPLICIT_RESTORE`, restore the verified coordinator backup before any production startup. If the result is `STOP`, do not form, pair, or start the network; investigate or roll back first.
