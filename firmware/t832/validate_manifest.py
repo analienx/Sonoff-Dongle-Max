@@ -77,6 +77,10 @@ def main() -> None:
             if symbol in compile_symbols:
                 fail(f"compile symbol configured twice: {symbol}")
             compile_symbols.add(symbol)
+            if m["kind"] == "compile_define" and m.get("upstream") not in (None, "disabled"):
+                src = m.get("upstream_source")
+                if not isinstance(src, dict) or not src.get("path") or not src.get("needle"):
+                    fail(f"compile mutation lacks pinned upstream-default proof: {m['id']}")
 
     preserved = data["control_semantics"]["preserve_ti_release_defaults"]
     if len(preserved) != len(set(preserved)):
@@ -107,8 +111,35 @@ def main() -> None:
         if not setting.get("proof"):
             fail(f"project-seed proof missing: {setting.get('symbol')}")
     inactive_symbols = {x.get("symbol") for x in inactive}
-    if inactive_symbols != {"FEATURE_MAC_SECURITY", "FEATURE_FREQ_HOP_MODE"}:
+    required_inactive = {
+        "FEATURE_MAC_SECURITY",
+        "FEATURE_FREQ_HOP_MODE",
+        "ZSTACK_5_30_NV_MIGRATION",
+        "ZSTACK_NVOCMP_MIGRATION",
+    }
+    if inactive_symbols != required_inactive:
         fail(f"inactive project-seed features mismatch: {sorted(inactive_symbols)}")
+
+    board = data.get("board_contract")
+    if not isinstance(board, dict):
+        fail("board_contract is required")
+    if board.get("uart") != {"rx_dio": 12, "tx_dio": 13}:
+        fail("MR4U UART board contract must remain RX DIO12 / TX DIO13")
+    if board.get("rf_switch") != {"rf_24ghz_dio": 28, "high_pa_dio": 29}:
+        fail("MR4U RF switch board contract must remain DIO28/DIO29")
+    if board.get("bootloader_backdoor") != {"dio": 15, "level": "active-low"}:
+        fail("MR4U BSL/bootloader board contract must remain DIO15 active-low")
+    if board.get("internal_nvs", {}).get("region_bytes") != 10240:
+        fail("MR4U/T832 internal NVS board contract must be five 2 KiB pages")
+
+    cp = data.get("capacity_policy")
+    if not isinstance(cp, dict) or cp.get("status") != "PROVISIONAL_UNTIL_PRIVATE_GATE":
+        fail("capacity policy must remain explicitly provisional until private gate")
+    if by_id := {m["id"]: m for m in mutations}:
+        if str(by_id["capacity.tc_devices"]["configured"]) != "128":
+            fail("T832 R0 provisional TCLK control value must be 128")
+        if str(by_id["capacity.neighbors"]["configured"]) != "80":
+            fail("T832 R0 provisional neighbor control value must be 80")
 
     mc = data["memory_contract"]
     if mc["nvs_pages"] * mc["nvs_page_bytes"] != mc["expected_flash_nv_bytes"]:
@@ -126,6 +157,10 @@ def main() -> None:
         "restore.project_seed_nvs_pages",
         "headroom.c_isr_stack",
         "build.mt_version_identity",
+        "board.internal_nvs_region",
+        "board.remove_launchpad_buttons",
+        "board.remove_launchpad_leds",
+        "board.remove_launchpad_external_nvs",
     }
     missing = sorted(required_ids - ids)
     if missing:

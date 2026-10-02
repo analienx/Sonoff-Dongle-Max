@@ -362,6 +362,111 @@ static void NPITLUART_eventCallBack(UART2_Handle handle, uint32_t event, uint32_
         detail="project linker NVS pages 2 -> 5 to match compiler and 8.32 linker contract",
     )
 
+    # BOARD — reduce the official LaunchPad seed to the peripherals that are
+    # actually part of the MR4U radio-board contract. All edits remain exact
+    # and fail closed against the pinned TI example seed.
+    patch.replace_exact(
+        "board.internal_nvs_region",
+        syscfg,
+        "NVS1.internalFlash.regionSize = 0x4000;",
+        "NVS1.internalFlash.regionSize = 0x2800;",
+        detail="internal NVS region 0x4000 -> 0x2800 (five 2 KiB pages)",
+    )
+
+    patch.replace_exact(
+        "board.remove_launchpad_buttons",
+        syscfg,
+        'var Button  = scripting.addModule("/ti/drivers/apps/Button");\n',
+        "",
+        detail="remove LaunchPad Button module from MR4U control seed",
+    )
+    replace_unrecorded(
+        syscfg,
+        "var Button1  = Button.addInstance();\nvar Button2  = Button.addInstance();\n",
+        "",
+    )
+    replace_unrecorded(
+        syscfg,
+        """/* Left Button */
+Button1.$name                       = "CONFIG_BTN_LEFT";
+Button1.$hardware                   = system.deviceData.board.components["BTN-1"];
+Button1.gpioPin.$name               = "CONFIG_GPIO_BTN1";
+Button1.gpioPin.pull                = "Pull Up";
+
+/* Left Button */
+Button2.$name                       = "CONFIG_BTN_RIGHT";
+Button2.$hardware                   = system.deviceData.board.components["BTN-2"];
+Button2.gpioPin.$name               = "CONFIG_GPIO_BTN2";
+Button2.gpioPin.pull                = "Pull Up";
+
+
+""",
+        "",
+    )
+
+    patch.replace_exact(
+        "board.remove_launchpad_leds",
+        syscfg,
+        'var LED     = scripting.addModule("/ti/drivers/apps/LED");\n',
+        "",
+        detail="remove LaunchPad LED module from MR4U control seed",
+    )
+    replace_unrecorded(
+        syscfg,
+        "var LED1     = LED.addInstance();\nvar LED2     = LED.addInstance();\n",
+        "",
+    )
+    replace_unrecorded(
+        syscfg,
+        """/* Red LED */
+LED1.$name                      = "CONFIG_LED_RED";
+LED1.$hardware                  = system.deviceData.board.components.LED_RED;
+LED1.gpioPin.$name              = "CONFIG_GPIO_RLED";
+LED1.gpioPin.mode               = "Output";
+
+/* Green LED */
+LED2.$name                      = "CONFIG_LED_GREEN";
+LED2.$hardware                  = system.deviceData.board.components.LED_GREEN;
+LED2.gpioPin.$name              = "CONFIG_GPIO_GLED";
+LED2.gpioPin.mode               = "Output";
+
+
+""",
+        "",
+    )
+
+    patch.replace_exact(
+        "board.remove_launchpad_external_nvs",
+        syscfg,
+        "var NVS2     = NVS.addInstance();\n",
+        "",
+        detail="remove LaunchPad MX25R8035F external NVS instance",
+    )
+    replace_unrecorded(
+        syscfg,
+        """/* External NVS */
+NVS2.$name                          = "CONFIG_NVSEXTERNAL";
+NVS2.nvsType                        = "External";
+NVS2.$hardware                      = system.deviceData.board.components.MX25R8035F;
+NVS2.externalFlash.regionBase       = 0;
+NVS2.externalFlash.regionSize       = 0x256000;
+NVS2.externalFlash.sectorSize       = 0x1000;
+NVS2.externalFlash.verifyBufferSize = 64;
+
+
+/* External NVS SPI instance */
+var NVSSPI25XDevice1 = NVS2.externalFlash.spiFlashDevice;
+var SPI1                   = NVSSPI25XDevice1.sharedSpiInstance;
+SPI1.$name                 = "CONFIG_SPI_0";
+SPI1.sclkPinInstance.$name = "CONFIG_PIN_SPI_SCLK";
+SPI1.misoPinInstance.$name = "CONFIG_PIN_SPI_MISO";
+SPI1.mosiPinInstance.$name = "CONFIG_PIN_SPI_MOSI";
+
+
+""",
+        "",
+    )
+
     expected_ids = {m["id"] for m in manifest["mutations"]}
     applied_ids = {m["id"] for m in patch.applied}
     if applied_ids != expected_ids:

@@ -33,6 +33,15 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def git_show_text(root: Path, commit: str, relative: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), "show", f"{commit}:{relative}"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout
+
+
 def git_tree_manifest(root: Path, commit: str, relative: str) -> dict[str, str]:
     """Return path -> Git blob SHA from the pinned commit, never the patched worktree."""
     proc = subprocess.run(
@@ -94,9 +103,78 @@ def run_compat(args: argparse.Namespace) -> None:
         ).hexdigest()
         critical[rel] = {"files": len(a), "tree_sha256": digest}
 
+    # Manifest upstream values are claims about the pinned pristine TI 8.32
+    # tree, not comments. Prove every declared source/default needle before
+    # considering the control manifest trustworthy.
+    upstream_defaults: dict[str, Any] = {}
+    for mutation in manifest["mutations"]:
+        source = mutation.get("upstream_source")
+        if not source:
+            continue
+        pristine = git_show_text(args.sdk832, actual["sdk832"], source["path"])
+        count = pristine.count(source["needle"])
+        if count != 1:
+            raise SystemExit(
+                f"upstream-default proof failed for {mutation['id']}: "
+                f"{source['path']} needle count={count}"
+            )
+        upstream_defaults[mutation["id"]] = {
+            "path": source["path"],
+            "needle": source["needle"],
+            "count": count,
+            "declared_upstream": mutation.get("upstream"),
+        }
+
+    # Prove the MR4U-relevant mapping against the pinned TI 8.32 board data.
+    board_meta = git_show_text(
+        args.sdk832, actual["sdk832"],
+        "source/ti/boards/.meta/LP_EM_CC2674P10.syscfg.json",
+    )
+    ccfg_meta = git_show_text(
+        args.sdk832, actual["sdk832"],
+        "source/ti/common/.meta/lprf_ccfg_settings.js",
+    )
+    board_needles = {
+        "uart_rx_dio12": '"RXD" : "18", /* DIO12 */',
+        "uart_tx_dio13": '"TXD" : "19"  /* DIO13 */',
+        "rf_24ghz_dio28": '"24GHZ": {"type": "RF_24GHZ", "connection": 41 /* DIO28 */}',
+        "rf_high_pa_dio29": '"HIGH_PA": {"type": "RF_HIGH_PA", "connection": 42 /* DIO29 */}',
+    }
+    for label, needle in board_needles.items():
+        if needle not in board_meta:
+            raise SystemExit(f"8.32 board metadata missing {label}: {needle}")
+    for needle in (
+        "LP_EM_CC2674P10_CCFG_SETTINGS",
+        "xoscCapArrayDelta: 0xD5",
+        "dioBootloaderBackdoor: 15",
+        'levelBootloaderBackdoor: "Active low"',
+    ):
+        if needle not in ccfg_meta:
+            raise SystemExit(f"8.32 CCFG metadata missing MR4U/P10 contract token: {needle}")
+
     project = find_project(args.examples)
     if not project.exists():
         raise SystemExit(f"project seed missing: {project}")
+    syscfg = args.examples / "examples/rtos/LP_EM_CC2674P10/zstack/znp/tirtos7/znp.syscfg"
+    if not syscfg.exists():
+        raise SystemExit(f"project SysConfig seed missing: {syscfg}")
+    syscfg_text = syscfg.read_text(encoding="utf-8")
+    if "NVS1.internalFlash.regionSize = 0x2800;" not in syscfg_text:
+        raise SystemExit("T832 SysConfig seed does not use the five-page 0x2800 internal NVS region")
+    forbidden_launchpad = (
+        "Button.addInstance", "LED.addInstance", "CONFIG_BTN_", "CONFIG_LED_",
+        "CONFIG_NVSEXTERNAL", "CONFIG_SPI_0", "MX25R8035F", "NVS2.",
+    )
+    present = [token for token in forbidden_launchpad if token in syscfg_text]
+    if present:
+        raise SystemExit(f"unpruned LaunchPad-only SysConfig dependencies: {present}")
+    for token in (
+        'Display_UART.$hardware = system.deviceData.board.components.XDS110UART;',
+        'RF.$hardware = system.deviceData.board.components.RF;',
+    ):
+        if token not in syscfg_text:
+            raise SystemExit(f"required P10 UART/RF SysConfig contract missing: {token}")
+
     project_text = project.read_text(encoding="utf-8")
     xml = ET.fromstring(project_text)
     node = xml.find("project")
@@ -174,6 +252,16 @@ def run_compat(args: argparse.Namespace) -> None:
         "device": node.attrib.get("device"),
         "cgt_version": node.attrib.get("cgtVersion"),
         "critical_equal_paths": critical,
+        "upstream_default_proof": upstream_defaults,
+        "board_contract": {
+            "uart_rx_dio": 12,
+            "uart_tx_dio": 13,
+            "rf_24ghz_dio": 28,
+            "rf_high_pa_dio": 29,
+            "bootloader_backdoor_dio": 15,
+            "internal_nvs_region_bytes": 0x2800,
+            "launchpad_only_dependencies_present": [],
+        },
         "sdk_832_project_references_checked": len(refs),
         "sdk_832_project_references_missing": [],
         "compiler_contract": {
@@ -325,6 +413,8 @@ def run_build(args: argparse.Namespace) -> None:
     forbidden_seed_symbols = {
         "FEATURE_MAC_SECURITY": ("macSecurityPibDefaults", "macSecurityPibTbl"),
         "FEATURE_FREQ_HOP_MODE": ("FHPIB_defaults", "FH_PibTbl"),
+        "ZSTACK_5_30_NV_MIGRATION": ("zgMigrateTo530SDK",),
+        "ZSTACK_NVOCMP_MIGRATION": ("zgNVOCMPMigration",),
     }
     inactive_link_proof: dict[str, Any] = {}
     for feature in manifest["project_seed_contract"]["inactive_feature_macros"]:
@@ -338,6 +428,18 @@ def run_build(args: argparse.Namespace) -> None:
             "forbidden_symbols_checked": list(forbidden_seed_symbols[symbol]),
             "linked_symbols_found": [],
         }
+
+    driver_configs = list(args.workspace.rglob("ti_drivers_config.c"))
+    if len(driver_configs) != 1:
+        raise SystemExit(f"expected one generated ti_drivers_config.c, found {driver_configs}")
+    driver_text = driver_configs[0].read_text(encoding="utf-8", errors="replace")
+    forbidden_generated = (
+        "CONFIG_BTN_LEFT", "CONFIG_BTN_RIGHT", "CONFIG_GPIO_BTN1", "CONFIG_GPIO_BTN2",
+        "CONFIG_LED_RED", "CONFIG_LED_GREEN", "CONFIG_NVSEXTERNAL", "CONFIG_SPI_0",
+    )
+    leaked = [token for token in forbidden_generated if token in driver_text]
+    if leaked:
+        raise SystemExit(f"LaunchPad-only peripherals leaked into generated driver config: {leaked}")
 
     if not args.out_file.exists() or args.out_file.stat().st_size == 0:
         raise SystemExit("linked .out artifact missing")

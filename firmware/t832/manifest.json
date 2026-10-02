@@ -51,7 +51,9 @@
       "source/ti/common/nv",
       "source/ti/drivers/UART2.h",
       "source/ti/drivers/uart2",
-      "kernel/tirtos7"
+      "kernel/tirtos7",
+      "source/ti/boards/.meta/LP_EM_CC2674P10.syscfg.json",
+      "source/ti/common/.meta/lprf_ccfg_settings.js"
     ],
     "required_project_references_exist_in_sdk_832": true,
     "note": "CI records byte-for-byte equality for critical 8.32 vs 8.33 paths and separately proves that every SDK path referenced by the 8.33 project seed exists in the pinned 8.32 tree."
@@ -109,10 +111,16 @@
       "symbol": "NVOCMP_RECOVER_FROM_COMPACT_FAILURE",
       "upstream": "disabled",
       "configured": "defined",
-      "rationale": "Enable TI's customer-opt-in recovery path for NVOCMP compaction failure; historical coordinator stability work identifies this path as relevant to long-running failures.",
+      "rationale": "Enable TI's customer-opt-in recovery path for an NVOCMP compaction failure as part of the reviewed coordinator-stability baseline. In TI 8.32 this recovery erases/reformats all NVOCMP pages when triggered, so it is explicitly NOT state-preserving and is acceptable only with a fresh verified coordinator backup and rollback path.",
       "proof": [
         "effective_macros",
         "compile_assert"
+      ],
+      "safety_impact": "DESTRUCTIVE_ON_TRIGGER: TI 8.32 may erase/reformat all NVOCMP pages after compaction failure.",
+      "production_preconditions": [
+        "fresh coordinator/network/security backup verified readable",
+        "rollback firmware and restore procedure verified",
+        "no interpretation of this recovery path as preserving coordinator state"
       ]
     },
     {
@@ -150,13 +158,18 @@
       "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
       "symbol": "ZDSECMGR_TC_DEVICE_MAX",
       "upstream": "40",
-      "configured": "400",
-      "rationale": "Provide Trust Center device/key capacity well above the current ~100-device network so security state is not the limiting resource.",
+      "configured": "128",
+      "rationale": "Use a provisional network-derived Trust Center capacity: the current public design basis is about 100 TCLK/link-key records, so 128 provides roughly the documented +25% reserve without carrying the generic Koenkk 400-entry allocation. Production authorization still requires the fresh private capacity gate.",
       "proof": [
         "effective_macros",
         "compile_assert",
         "linker_memory_margin"
-      ]
+      ],
+      "production_precondition": "Fresh private TCLK demand must be <= configured capacity and satisfy the documented reserve policy before flash authorization.",
+      "upstream_source": {
+        "path": "source/ti/zstack/stack/zdo/zd_sec_mgr.h",
+        "needle": "#define ZDSECMGR_TC_DEVICE_MAX 40"
+      }
     },
     {
       "id": "capacity.broadcast_table",
@@ -171,7 +184,11 @@
         "effective_macros",
         "compile_assert",
         "linker_memory_margin"
-      ]
+      ],
+      "upstream_source": {
+        "path": "source/ti/zstack/stack/nwk/nwk_globals.h",
+        "needle": "#define MAX_BCAST 9"
+      }
     },
     {
       "id": "capacity.neighbors",
@@ -180,13 +197,18 @@
       "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
       "symbol": "MAX_NEIGHBOR_ENTRIES",
       "upstream": "16",
-      "configured": "50",
-      "rationale": "Raise the coordinator neighbor table above TI's small-network default for a network with ~60 mains routers.",
+      "configured": "80",
+      "rationale": "Set the provisional neighbor table above the repository's hard >=60+reserve policy for the roughly 60-router production topology. 80 is a control-build ceiling, not a claim that all routers are direct neighbors; production authorization still uses the fresh private inventory/capacity gate.",
       "proof": [
         "effective_macros",
         "compile_assert",
         "linker_memory_margin"
-      ]
+      ],
+      "production_precondition": "deploy/p10_capacity_gate.py must pass against the fresh private router inventory and configured reserve.",
+      "upstream_source": {
+        "path": "source/ti/zstack/stack/nwk/nwk_globals.h",
+        "needle": "#define MAX_NEIGHBOR_ENTRIES    16"
+      }
     },
     {
       "id": "capacity.routes",
@@ -201,7 +223,11 @@
         "effective_macros",
         "compile_assert",
         "linker_memory_margin"
-      ]
+      ],
+      "upstream_source": {
+        "path": "source/ti/zstack/sysconfig/ti_zstack_config.h",
+        "needle": "#define MAX_RTG_ENTRIES               40"
+      }
     },
     {
       "id": "capacity.source_routes",
@@ -216,7 +242,11 @@
         "effective_macros",
         "compile_assert",
         "linker_memory_margin"
-      ]
+      ],
+      "upstream_source": {
+        "path": "source/ti/zstack/stack/nwk/nwk_globals.h",
+        "needle": "#define MAX_RTG_SRC_ENTRIES 12"
+      }
     },
     {
       "id": "capacity.route_requests",
@@ -231,7 +261,11 @@
         "effective_macros",
         "compile_assert",
         "linker_memory_margin"
-      ]
+      ],
+      "upstream_source": {
+        "path": "source/ti/zstack/sysconfig/ti_zstack_config.h",
+        "needle": "#define MAX_RREQ_ENTRIES              8"
+      }
     },
     {
       "id": "capacity.device_list",
@@ -247,7 +281,11 @@
         "compile_assert",
         "linker_memory_margin",
         "capacity_gate"
-      ]
+      ],
+      "upstream_source": {
+        "path": "source/ti/zstack/stack/nwk/nwk_globals.h",
+        "needle": "#define NWK_MAX_DEVICE_LIST     20"
+      }
     },
     {
       "id": "capacity.conflicted_addresses",
@@ -262,7 +300,11 @@
         "effective_macros",
         "compile_assert",
         "linker_memory_margin"
-      ]
+      ],
+      "upstream_source": {
+        "path": "source/ti/zstack/stack/nwk/nwk_globals.h",
+        "needle": "#define CONFLICTED_ADDR_TABLE_SIZE   3"
+      }
     },
     {
       "id": "baseline.concentrator_enable",
@@ -276,7 +318,11 @@
       "proof": [
         "effective_macros",
         "compile_assert"
-      ]
+      ],
+      "upstream_source": {
+        "path": "source/ti/zstack/stack/sys/zglobals.h",
+        "needle": "#define CONCENTRATOR_ENABLE          false"
+      }
     },
     {
       "id": "baseline.concentrator_route_cache",
@@ -290,7 +336,11 @@
       "proof": [
         "effective_macros",
         "compile_assert"
-      ]
+      ],
+      "upstream_source": {
+        "path": "source/ti/zstack/stack/sys/zglobals.h",
+        "needle": "#define CONCENTRATOR_ROUTE_CACHE     false"
+      }
     },
     {
       "id": "baseline.concentrator_discovery_time",
@@ -304,7 +354,11 @@
       "proof": [
         "effective_macros",
         "compile_assert"
-      ]
+      ],
+      "upstream_source": {
+        "path": "source/ti/zstack/stack/sys/zglobals.h",
+        "needle": "#define CONCENTRATOR_DISCOVERY_TIME  0"
+      }
     },
     {
       "id": "headroom.mac_tx_data",
@@ -483,6 +537,63 @@
         "project_contract",
         "linker_map_nvs"
       ]
+    },
+    {
+      "id": "board.internal_nvs_region",
+      "classification": "BOARD",
+      "kind": "syscfg_patch",
+      "target": "examples:examples/rtos/LP_EM_CC2674P10/zstack/znp/tirtos7/znp.syscfg",
+      "symbol": "CONFIG_NVSINTERNAL.regionSize",
+      "upstream": "0x4000",
+      "configured": "0x2800",
+      "rationale": "Make the SysConfig internal NVS region exactly match the five-page T832 linker/NVOCMP contract instead of the LaunchPad seed's unrelated 16 KiB region.",
+      "proof": [
+        "project_contract",
+        "generated_driver_config",
+        "linker_map_nvs"
+      ]
+    },
+    {
+      "id": "board.remove_launchpad_buttons",
+      "classification": "BOARD",
+      "kind": "syscfg_patch",
+      "target": "examples:examples/rtos/LP_EM_CC2674P10/zstack/znp/tirtos7/znp.syscfg",
+      "symbol": "LaunchPad Button1/Button2",
+      "upstream": "enabled on DIO15/DIO14",
+      "configured": "removed",
+      "rationale": "MR4U uses DIO15 as the active-low BSL/bootloader backdoor, not as a runtime LaunchPad button. Remove both LaunchPad button instances to avoid undocumented runtime ownership of MR4U pins.",
+      "proof": [
+        "project_contract",
+        "generated_driver_config"
+      ]
+    },
+    {
+      "id": "board.remove_launchpad_leds",
+      "classification": "BOARD",
+      "kind": "syscfg_patch",
+      "target": "examples:examples/rtos/LP_EM_CC2674P10/zstack/znp/tirtos7/znp.syscfg",
+      "symbol": "LaunchPad LED1/LED2",
+      "upstream": "enabled on DIO6/DIO7 using LaunchPad color mapping",
+      "configured": "removed",
+      "rationale": "The TI LaunchPad LED color mapping is not the MR4U board contract and the ZNP control does not require application LEDs. Removing the instances avoids a cosmetic board mismatch becoming a runtime pin dependency.",
+      "proof": [
+        "project_contract",
+        "generated_driver_config"
+      ]
+    },
+    {
+      "id": "board.remove_launchpad_external_nvs",
+      "classification": "BOARD",
+      "kind": "syscfg_patch",
+      "target": "examples:examples/rtos/LP_EM_CC2674P10/zstack/znp/tirtos7/znp.syscfg",
+      "symbol": "CONFIG_NVSEXTERNAL / CONFIG_SPI_0",
+      "upstream": "MX25R8035F LaunchPad external flash enabled",
+      "configured": "removed",
+      "rationale": "The official project seed assumes a LaunchPad MX25R8035F and SPI wiring that are not part of the proven MR4U radio-board contract. ZNP persistence uses the internal NVOCMP/NVS region, so remove this unproven peripheral dependency.",
+      "proof": [
+        "project_contract",
+        "generated_driver_config"
+      ]
     }
   ],
   "forbidden_in_control": [
@@ -544,7 +655,66 @@
       {
         "symbol": "FEATURE_FREQ_HOP_MODE",
         "rationale": "Must remain absent; frequency-hopping shared MAC tables are not part of the 2.4 GHz Zigbee ZNP control."
+      },
+      {
+        "symbol": "ZSTACK_5_30_NV_MIGRATION",
+        "rationale": "Must remain absent because TI 8.32 uses a uint8_t loop index in the legacy 5.30 TCLK migration path; TCLK capacities above 255 would make that path unsafe."
+      },
+      {
+        "symbol": "ZSTACK_NVOCMP_MIGRATION",
+        "rationale": "Must remain absent because TI explicitly warns that legacy NVOCMP migration assumes table sizes such as ZDSECMGR_TC_DEVICE_MAX do not change between images; T832 deliberately changes capacity."
       }
     ]
+  },
+  "capacity_policy": {
+    "status": "PROVISIONAL_UNTIL_PRIVATE_GATE",
+    "principle": "configured = measured current demand + justified reserve; do not inherit generic giant tables merely because P10 has RAM",
+    "public_design_basis": {
+      "tclk_link_key_records": "about 100",
+      "routers": "about 60",
+      "tclk_reserve_policy": "+25%",
+      "neighbor_policy": ">= max(60, router_count) + configured reserve"
+    },
+    "provisional_control_values": {
+      "ZDSECMGR_TC_DEVICE_MAX": 128,
+      "MAX_NEIGHBOR_ENTRIES": 80
+    },
+    "production_authorization": "Fail closed until deploy/p10_capacity_gate.py is run against the fresh private inventory/backup and every relevant table demand is proven."
+  },
+  "board_contract": {
+    "source_board": "TI LP_EM_CC2674P10 seed, reduced to MR4U-relevant peripherals",
+    "uart": {
+      "rx_dio": 12,
+      "tx_dio": 13
+    },
+    "rf_switch": {
+      "rf_24ghz_dio": 28,
+      "high_pa_dio": 29
+    },
+    "bootloader_backdoor": {
+      "dio": 15,
+      "level": "active-low"
+    },
+    "internal_nvs": {
+      "pages": 5,
+      "page_bytes": 2048,
+      "region_bytes": 10240
+    },
+    "removed_launchpad_only_components": [
+      "BTN-1 / BTN-2 runtime button instances",
+      "LaunchPad LED instances",
+      "MX25R8035F external NVS and its SPI instance"
+    ],
+    "lab_ccfg_authority": {
+      "prefix_bytes": 124,
+      "sha256": "d56ebd80f495a87ae73e36ab8acbeaf7313fb1469bbc7becbe536190daf5b4f2",
+      "observed_vendor_images": [
+        "20240716",
+        "20250325",
+        "20260310",
+        "20260311"
+      ],
+      "note": "Local lab evidence only; CI does not treat this hash as a substitute for generated CCFG inspection."
+    }
   }
 }
