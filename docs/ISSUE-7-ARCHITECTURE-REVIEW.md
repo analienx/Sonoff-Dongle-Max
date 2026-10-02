@@ -1,6 +1,10 @@
+# Historical scope: sonoff-mg24 / P009
+
+> This document is retained as historical SONOFF EFR32MG24 / Ember evidence. It does not describe the current MR4U/CC2674P10 coordinator. See [COORDINATOR_REGISTRY.md](COORDINATOR_REGISTRY.md) before reusing conclusions across hardware families.
+
 # Issue #7: architecture review and supervisor handoff
 Review date: 2026-09-07. Status: prepared for review; not posted to GitHub. No production operations were performed.
-Reviewed candidate: repository commit `dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600`, builder `858c34b0eb6f53a2e0c89455ea489ceaa62d58db`, herdsman `0968f979d558874b17396c96b66382d4236bbdcd`, Actions run [33907171158](https://github.com/analienx/Sonoff-Dongle-Max/actions/runs/33907171158). The local GBL, HEX, and ELF hashes were independently checked against the downloaded build manifest: all six match.
+Reviewed candidate: repository commit `dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600`, builder `858c34b0eb6f53a2e0c89455ea489ceaa62d58db`, herdsman `0968f979d558874b17396c96b66382d4236bbdcd`, Actions run [33907171158](https://github.com/analienx/Zigbee-Coordinator/actions/runs/33907171158). The local GBL, HEX, and ELF hashes were independently checked against the downloaded build manifest: all six match.
 Evidence labels used below: **confirmed** means inspected source or actual ELF contents; **expected** means a conclusion from startup code without live readback; **reported** means retained investigation evidence; **unknown** means the review could not establish the value. These distinctions matter: successful compilation, a manifest value, an ELF initializer, and a running NCP configuration are different evidence.
 ## 1. Executive verdict
 **SHIP P009 BUT FIX BLOCKERS FIRST.**
@@ -13,7 +17,7 @@ The principal technical conclusions are:
 4. The actual P009 static `.bss` delta is **704 bytes**, not 320. Both images reserve **229,896 bytes** for the memory manager. That reservation is not a measurement of free Zigbee packet memory.
 5. The next firmware architecture should add a small, read-only identity extension and, if useful, bounded health snapshots. It should continue to operate with stock Z2M without requiring those diagnostics.
 6. The first improvement to implement is trustworthy acceptance and evidence collection. XNCP, watchdog changes, group-capacity changes, and transport experiments should be separately identifiable candidates.
-The prepared review follows the deliverable structure in [issue #7](https://github.com/analienx/Sonoff-Dongle-Max/issues/7). Implementation and deployment remain separate subsequent work.
+The prepared review follows the deliverable structure in [issue #7](https://github.com/analienx/Zigbee-Coordinator/issues/7). Implementation and deployment remain separate subsequent work.
 ## 2. Assumptions challenged
 | Assumption | Verdict | Evidence | Consequence |
 |---|---|---|---|
@@ -454,16 +458,16 @@ These gaps are explicit. The measured binary profile and the confirmed harness d
 [nabu]: https://github.com/NabuCasa/silabs-firmware-builder/blob/c65e86eb5b62c098615060e5562a6654a227bf0e/manifests/nabucasa/zbt2/zbt2_zigbee_ncp.yaml
 [nabubase]: https://github.com/NabuCasa/silabs-firmware-builder/blob/c65e86eb5b62c098615060e5562a6654a227bf0e/src/zigbee_ncp/zigbee_ncp.slcp
 [xncp]: https://github.com/NabuCasa/silabs-firmware-builder/blob/c65e86eb5b62c098615060e5562a6654a227bf0e/src/zigbee_ncp/extension/xncp_extension/src/xncp_core.c
-[verify]: https://github.com/analienx/Sonoff-Dongle-Max/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/firmware/verify_build.py
-[workflow]: https://github.com/analienx/Sonoff-Dongle-Max/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/.github/workflows/build-p009.yml
-[common]: https://github.com/analienx/Sonoff-Dongle-Max/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/deploy/p009_common.py
-[deploy]: https://github.com/analienx/Sonoff-Dongle-Max/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/deploy/p009_deploy.py
-[accept]: https://github.com/analienx/Sonoff-Dongle-Max/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/deploy/p009_accept.py
-[active]: https://github.com/analienx/Sonoff-Dongle-Max/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/deploy/acceptance-active.cjs
-[permit]: https://github.com/analienx/Sonoff-Dongle-Max/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/deploy/acceptance-permitjoin.cjs
-[policy]: https://github.com/analienx/Sonoff-Dongle-Max/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/runtime/patch_herdsman.py
-[p010]: https://github.com/analienx/Sonoff-Dongle-Max/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/runtime/patch_herdsman_observability.py
-[research]: https://github.com/analienx/Sonoff-Dongle-Max/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/docs/TUNING-RESEARCH.md
+[verify]: https://github.com/analienx/Zigbee-Coordinator/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/firmware/verify_build.py
+[workflow]: https://github.com/analienx/Zigbee-Coordinator/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/.github/workflows/build-p009.yml
+[common]: https://github.com/analienx/Zigbee-Coordinator/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/deploy/p009_common.py
+[deploy]: https://github.com/analienx/Zigbee-Coordinator/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/deploy/p009_deploy.py
+[accept]: https://github.com/analienx/Zigbee-Coordinator/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/deploy/p009_accept.py
+[active]: https://github.com/analienx/Zigbee-Coordinator/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/deploy/acceptance-active.cjs
+[permit]: https://github.com/analienx/Zigbee-Coordinator/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/deploy/acceptance-permitjoin.cjs
+[policy]: https://github.com/analienx/Zigbee-Coordinator/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/runtime/patch_herdsman.py
+[p010]: https://github.com/analienx/Zigbee-Coordinator/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/runtime/patch_herdsman_observability.py
+[research]: https://github.com/analienx/Zigbee-Coordinator/blob/dca87aa4fb8405ef2ca4f0ef647c60bd46ef3600/docs/TUNING-RESEARCH.md
 [config]: https://docs.silabs.com/zigbee/latest/sisdk-ezsp-reference-guide/02-emberznet-serial-protocol
 [custom]: https://docs.silabs.com/zigbee/latest/customized-ncp-zigbee7/03-component-customizations
 [stackinfo]: https://docs.silabs.com/zigbee/latest/zigbee-stack-api/stack-info-h
