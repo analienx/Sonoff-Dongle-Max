@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 
 
@@ -75,12 +76,27 @@ def append_opts(path: Path) -> None:
     replace_exact(path, marker, block)
 
 
+def git_head(path: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+
+
 def apply(sdk: Path, examples: Path) -> dict[str, object]:
     # Keep these assertions close to the edit logic: wrong trees must stop.
     sdk_git = sdk / ".git"
     examples_git = examples / ".git"
     if not sdk_git.exists() or not examples_git.exists():
         raise SystemExit("SDK and examples inputs must be Git checkouts")
+    sdk_head = git_head(sdk)
+    examples_head = git_head(examples)
+    if sdk_head != SDK_COMMIT:
+        raise SystemExit(f"SDK HEAD {sdk_head} != pinned {SDK_COMMIT}")
+    if examples_head != EXAMPLES_COMMIT:
+        raise SystemExit(f"examples HEAD {examples_head} != pinned {EXAMPLES_COMMIT}")
 
     # LARGE_NETWORK_BASELINE — MAC queue headroom.
     opts = sdk / "source/ti/zstack/apps/znp/znp_cnf.opts"
