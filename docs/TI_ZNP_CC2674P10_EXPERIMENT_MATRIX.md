@@ -677,3 +677,101 @@ fix/p10-<proven-root-cause>
 Never build a diagnostic/fix image from an uncommitted dirty tree.
 
 Every flashed image must map to exactly one commit and manifest.
+
+
+---
+
+# 19. Reset-domain discrimination matrix
+
+The 2 Oct incident established that recovery method itself is diagnostic evidence.
+
+Observed on current MR4U/P10:
+
+- Zigbee2MQTT restart / serial reopen did not recover the radio.
+- Direct ZNP `SYS_RESET_REQ` produced no response and did not recover the radio.
+- SLZB-OS **Zigbee radio restart** recovered the P10 and restored valid `SYS_PING` over the Ethernet ZNP endpoint.
+- A previous full MR4U cold cycle did not immediately produce a usable ZNP path in the tested sequence; USB enumeration/transport sequencing also complicated that observation.
+
+Do not collapse these into a generic “restart”.
+
+## Reset classes
+
+| ID | Recovery action | Executes code on hung ZNP? | Expected volatile-state effect | Destructive to Zigbee NVM? |
+|---|---|---:|---:|---:|
+| R0 | Z2M restart / serial reopen | no P10 reset | none | no |
+| R1 | ZNP `SYS_RESET_REQ` | yes — requires MT/ZNP parser to run | application/system reset if serviced | no |
+| R2 | SLZB-OS radio restart / hardware reset line | no cooperation from ZNP expected | hardware reset; intended to clear active CPU/SRAM state | no |
+| R3 | true MR4U/P10 power removal | no | full volatile-state loss | no |
+| R4 | reflash same application image without mass erase | bootloader/debug path | image rewritten; persistent NVS may remain depending flash layout/tool | potentially no, but verify |
+| R5 | mass erase + reflash + restore | no | all volatile + application/NVS reset | **yes**; backup/restore required |
+
+## Interpretation
+
+### R1 fails, R2 succeeds
+
+Strongly supports one of:
+
+- MT/ZNP task deadlock/starvation;
+- heap/queue/resource exhaustion preventing command processing;
+- CPU/peripheral state that requires hardware reset;
+- fault/error spin;
+- stack corruption;
+- scheduler/interrupt deadlock.
+
+This pattern makes a reflash-only brick unlikely.
+
+### R2 fails, R3 succeeds
+
+Raises probability of:
+
+- reset-domain/AON/peripheral state not fully cleared by board-level RST;
+- reset-line implementation/timing problem;
+- hardware interface state surviving RST;
+- bridge/P10 reset sequencing issue.
+
+### R2 and R3 fail, R4 succeeds
+
+Raises probability of:
+
+- application flash corruption;
+- boot-time image/configuration corruption;
+- firmware state rewritten by flashing;
+- a bootloader/application transition problem.
+
+Do not infer NVS corruption unless R4 is proven to erase/change the relevant NVS region.
+
+### R4 fails, R5 + restore succeeds
+
+Raises probability of persistent NVS/configuration corruption or an incompatible stored state.
+
+This is the first outcome that strongly points to persistent network/application state rather than runtime volatile state.
+
+## Required future evidence
+
+For every reproduced F3/F4 event, record:
+
+1. exact failure timestamp;
+2. R0 outcome;
+3. one bounded R1 attempt;
+4. R2 outcome;
+5. R3 only if R2 fails;
+6. reflash only after evidence capture and backup gate;
+7. reset reason / fault breadcrumb in diagnostic builds.
+
+Never jump directly from F4 to reflash. The recovery boundary is part of the root-cause evidence.
+
+## TI hardware fact to preserve
+
+The CC2674P10 datasheet indicates that while the RESET pin is held, CPU/register state and SRAM are not retained. Therefore an R2 recovery is consistent with clearing a volatile runtime failure. It does **not** prove which volatile resource failed.
+
+Official reference:
+https://www.ti.com/lit/ds/symlink/cc2674p10.pdf
+
+## SMLIGHT known-issue comparison
+
+SMLIGHT documents a long-standing CC26XX SDK hang class affecting CC2674P10 with the same terminal symptom `SRSP - SYS - ping after 6000ms`. Their documentation notes that the radio may sometimes fail to respond even to the RST pin and can require physical power removal.
+
+Our present incident is therefore within the documented failure family, but the successful R2 radio restart is an important per-incident discriminator and must be preserved rather than generalized away.
+
+Official reference:
+https://smlight.tech/support/manuals/books/slzb-os/page/all-os-versions
