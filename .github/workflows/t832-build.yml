@@ -54,6 +54,16 @@ jobs:
             --enable-components PF_WCONN \
             --prefix "$HOME/ti/ccs1280"
 
+          # SDK 8.32 requires SysConfig >= 1.21.1; CCS 12.8 bundles 1.21.0.
+          SYSCFG_SETUP="$HOME/ti/downloads/sysconfig-1.21.1_3772-setup.run"
+          curl -fL --retry 5 --retry-delay 2 \
+            -o "$SYSCFG_SETUP" \
+            https://software-dl.ti.com/ccs/esd/sysconfig/sysconfig-1.21.1_3772-setup.run
+          chmod +x "$SYSCFG_SETUP"
+          "$SYSCFG_SETUP" \
+            --mode unattended \
+            --prefix "$HOME/ti/sysconfig_1.21.1"
+
       - name: Verify and export exact toolchain
         shell: bash
         run: |
@@ -69,8 +79,8 @@ jobs:
           find "$HOME/ti/ccs1280" -type f -name eclipse -perm -u+x -print | sort || true
 
           TIARMCLANG=$(find "$HOME/ti/ccs1280" -type f -name tiarmclang -perm -u+x -print -quit)
-          SYSCONFIG=$(find "$HOME/ti/ccs1280" -type f -name sysconfig_cli.sh -print -quit)
-          XDC=$(find "$HOME/ti/ccs1280" -type d -name 'xdctools_3_62_01_15_core' -print -quit)
+          SYSCONFIG=$(find "$HOME/ti/sysconfig_1.21.1" -type f -name sysconfig_cli.sh -print -quit)
+          XDC=$(find "$HOME/ti/ccs1280" -type d -name 'xdctools_3_62_01_16_core' -print -quit)
           CCS_ECLIPSE=$(find "$HOME/ti/ccs1280" -type f -name eclipse -path '*/eclipse/eclipse' -perm -u+x -print -quit)
 
           echo "selected_TIARMCLANG=$TIARMCLANG"
@@ -81,13 +91,14 @@ jobs:
           missing=0
           test -n "$TIARMCLANG" || { echo "::error::TI ARM Clang not installed by CCS PF_WCONN"; missing=1; }
           test -n "$SYSCONFIG" || { echo "::error::SysConfig CLI not installed by CCS PF_WCONN"; missing=1; }
-          test -n "$XDC" || { echo "::error::Exact XDCTools 3.62.01.15 not installed by CCS PF_WCONN"; missing=1; }
+          test -n "$XDC" || { echo "::error::CCS-bundled XDCTools 3.62.01.16 not installed"; missing=1; }
           test -n "$CCS_ECLIPSE" || { echo "::error::CCS Eclipse executable not found"; missing=1; }
           test "$missing" = 0
 
           "$TIARMCLANG" --version | tee /tmp/tiarmclang-version.txt
           grep -F '3.2.2.LTS' /tmp/tiarmclang-version.txt
           case "$SYSCONFIG" in *sysconfig_1.21.1*) ;; *) echo "Unexpected SysConfig: $SYSCONFIG"; exit 1;; esac
+          case "$XDC" in *xdctools_3_62_01_16_core*) ;; *) echo "Unexpected XDCTools: $XDC"; exit 1;; esac
 
           {
             echo "TIARMCLANG=$TIARMCLANG"
@@ -101,8 +112,8 @@ jobs:
             echo
             echo "- CCS: 12.8.0.00012"
             echo "- TI ARM Clang: 3.2.2.LTS"
-            echo "- SysConfig: 1.21.1"
-            echo "- XDCTools: 3.62.01.15"
+            echo "- SysConfig: 1.21.1.3772 (standalone)"
+            echo "- XDCTools: 3.62.01.16 (CCS 12.8 bundled; TI-supported patch successor to 3.62.01.15)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -155,7 +166,22 @@ jobs:
           print("T832 source allowlist: PASS")
           PY
 
-      - name: Register pinned F2 SDK with CCS
+      - name: Build pinned F2 SDK libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          TICLANG_ROOT="$(dirname "$(dirname "$TIARMCLANG")")"
+          test -x "$TICLANG_ROOT/bin/tiarmclang"
+          make -C sdk -j"$(nproc)" \
+            XDC_INSTALL_DIR="$XDC" \
+            SYSCONFIG_TOOL="$SYSCONFIG" \
+            CMAKE=cmake \
+            PYTHON=python3 \
+            TICLANG_ARMCOMPILER="$TICLANG_ROOT" \
+            GCC_ARMCOMPILER= \
+            IAR_ARMCOMPILER=
+
+      - name: Register pinned F2 SDK and SysConfig with CCS
         shell: bash
         run: |
           set -euo pipefail
@@ -166,7 +192,7 @@ jobs:
             -noSplash \
             -data "$GITHUB_WORKSPACE/ccs-workspace" \
             -application com.ti.common.core.initialize \
-            -ccs.productDiscoveryPath "$GITHUB_WORKSPACE/sdk"
+            -ccs.productDiscoveryPath "$GITHUB_WORKSPACE/sdk;$HOME/ti/sysconfig_1.21.1"
 
       - name: Import official CC2674P10 ZNP project
         shell: bash
@@ -234,7 +260,10 @@ jobs:
             echo "examples_commit=$(git -C examples rev-parse HEAD)"
             echo "ccs=12.8.0.00012"
             printf "tiarmclang="; "$TIARMCLANG" --version | head -1
+            echo "sysconfig=1.21.1.3772"
             echo "sysconfig_path=$SYSCONFIG"
+            echo "xdctools=3.62.01.16"
+            echo "xdctools_sdk_validated_baseline=3.62.01.15"
             echo "xdctools_path=$XDC"
           } > bundle/provenance/TOOLCHAIN.txt
 
