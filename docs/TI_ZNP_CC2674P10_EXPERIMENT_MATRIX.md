@@ -775,3 +775,125 @@ Our present incident is therefore within the documented failure family, but the 
 
 Official reference:
 https://smlight.tech/support/manuals/books/slzb-os/page/all-os-versions
+
+
+---
+
+# 20. Vendor regression ladder discovered 2026-10-02
+
+SMLIGHT's current public update API provides a much more precise firmware lineage than was known when this plan was first written.
+
+| ID | SMLIGHT revision | SDK | Channel | Baud | Public image SHA-256 | Diagnostic meaning |
+|---|---:|---|---|---:|---|---|
+| V24 | 20240716 | **7.41** | production | 115200 | `633f79058c39e2fc9335bb11f816ad6a045438515da11c36b30a46b7c8d1b7d9` | old stable/control candidate |
+| V25 | 20250325 | **8.30** | test/dev | 115200 | `16ad308f550947098f703d09148aafec5277550dd762fe72ec22e9768a3c5808` | SDK-transition intermediate; backup-safe lab use only |
+| V26-115 | 20260311 | **8.32.00.07** | beta | 115200 | `63af04ded64441bb355aa1ee874549f381c16dfb0e3f3954a00f475af9a5c94a` | observed failing production image |
+| V26-460 | 20260310 | **8.32.00.07** | beta | 460800 | `ff5a6fbf1a2c8327bcf28ea95b95189849b368f4952a92a64d25517db7fee7ec` | same vendor code family, high-baud variant |
+
+Vendor API:
+`https://updates.smlight.tech/services/api/slzb-06x-ota.php?type=ZB&format=slzb&device=4`
+
+## Critical 20260311 vendor deltas
+
+SMLIGHT explicitly describes 20260311/20260310 as containing low-level coordinator transport/runtime work:
+
+- removed one abstraction layer from the UART path;
+- optimized UART RX/TX ring buffers for P7/P10;
+- optimized NPI task stack usage;
+- optimized DMA and UART priorities;
+- optimized FIFO thresholds;
+- added a custom reset handler with reboot-reason tracking.
+
+This is now a first-class suspect area because the observed failure terminates in MT/ZNP command starvation.
+
+## Binary observations
+
+Downloaded directly from the public vendor URLs:
+
+- V24 image size: 182,840 bytes.
+- V25 image size: 278,126 bytes.
+- V26-115 image size: 278,134 bytes.
+- V26-460 image size: 278,134 bytes.
+- V24 -> V25 is a major image/layout transition (+95,286 bytes). The newer images expose MCUBoot-related strings absent from V24.
+- V25 vs V26-115: approximately 64.6% of overlapping raw bytes differ despite almost identical image size. Treat this as a substantial rebuild/code change.
+- V26-115 vs V26-460: only 106 raw bytes differ at equal size, strongly supporting the vendor statement that they are the same code family differentiated mainly by baud/build metadata and signatures.
+
+## Important TI-stack nuance
+
+SimpleLink SDK 8.32.00.07 still packages **TI Z-Stack 8.30.00.x**.
+
+Therefore V25 -> V26 is not best modeled as “new Zigbee routing stack generation”. Highest-value differences are:
+
+1. TI Core SDK / drivers;
+2. SMLIGHT NPI/UART/DMA implementation;
+3. runtime/task/buffer configuration;
+4. NVOCMP/NVS configuration.
+
+Routing and MTO load remain plausible triggers/accelerators rather than the leading terminal-fault location.
+
+## Concrete static-diff targets
+
+Before creating any custom fix, establish for V24 / V25 / V26 where technically possible:
+
+### NPI / UART
+- legacy UART vs UART2 vs vendor direct/custom UART path;
+- exact RX/TX ring-buffer sizes;
+- FIFO thresholds;
+- DMA use and channel configuration;
+- interrupt priorities;
+- NPI task priority and stack size;
+- TX completion mechanism;
+- `UART2_EVENT_TX_FINISHED` handling;
+- UART error/event handling;
+- host baud and timing.
+
+### NVOCMP / NVS
+- `NVOCMP_RECOVER_FROM_COMPACT_FAILURE` enabled/disabled;
+- NVOCMP version;
+- page count and page size;
+- NVS base/layout;
+- RAM-optimization mode;
+- compaction error path;
+- sanity-check availability;
+- migration behavior across V24 -> V25.
+
+### OS / fault handling
+- Error policy;
+- Hwi exception handling;
+- task/Hwi stack checks;
+- reset handler;
+- watchdog configuration;
+- reset-reason persistence.
+
+### Zigbee load/resource configuration
+- OSAL heap size / auto-size mode;
+- AF/MAC buffers;
+- routing/source-route/RREQ tables;
+- TCLK/device capacity;
+- MTO configuration;
+- route expiry.
+
+## Historical TI precedent — use as a hypothesis generator, not proof
+
+The long-running TI/Koenkk SDK 6.20 instability investigation showed a similar progression:
+
+- `MEM_ERROR` / `BUFFER_FULL`;
+- AF request timeouts;
+- eventual ZNP silence;
+- failure sometimes requiring 3–7 days to reproduce.
+
+The final stable combination in that investigation required **both**:
+
+1. `NVOCMP_RECOVER_FROM_COMPACT_FAILURE`;
+2. legacy UART instead of UART2.
+
+Earlier experiments with single changes were inconclusive. Therefore our P10 research must test subsystem combinations and avoid declaring a root cause from one correlated counter.
+
+## Current experiment priority
+
+1. Run V24 natural production soak without synthetic stress.
+2. Preserve exact time-to-F1/F2/F3/F4 if it fails.
+3. If V24 is stable beyond the V26 failure exposure, prioritize a **static V24 vs V26 transport/NVOCMP diff**.
+4. Use V25 only if needed as a controlled intermediate boundary; vendor labels it test/dev and warns of PAN/commissioning behavior.
+5. Build TI 8.30 release control to separate upstream TI behavior from SMLIGHT downstream changes.
+6. Only then create diagnostic/custom firmware.
