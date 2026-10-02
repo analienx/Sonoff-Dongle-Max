@@ -33,16 +33,22 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def tree_manifest(root: Path, relative: str) -> dict[str, str]:
-    base = root / relative
-    if not base.exists():
-        raise SystemExit(f"compatibility path missing: {base}")
-    if base.is_file():
-        return {relative: sha256_path(base)}
+def git_tree_manifest(root: Path, commit: str, relative: str) -> dict[str, str]:
+    """Return path -> Git blob SHA from the pinned commit, never the patched worktree."""
+    proc = subprocess.run(
+        ["git", "-C", str(root), "ls-tree", "-r", commit, "--", relative],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
     result: dict[str, str] = {}
-    for p in sorted(x for x in base.rglob("*") if x.is_file()):
-        rel = p.relative_to(root).as_posix()
-        result[rel] = sha256_path(p)
+    for line in proc.stdout.splitlines():
+        meta, path = line.split("\t", 1)
+        _mode, obj_type, sha = meta.split()
+        if obj_type == "blob":
+            result[path] = sha
+    if not result:
+        raise SystemExit(f"compatibility path missing from pinned commit: {relative}")
     return result
 
 
@@ -73,8 +79,8 @@ def run_compat(args: argparse.Namespace) -> None:
 
     critical: dict[str, Any] = {}
     for rel in compat["required_equal_sdk_paths"]:
-        a = tree_manifest(args.sdk832, rel)
-        b = tree_manifest(args.sdk833, rel)
+        a = git_tree_manifest(args.sdk832, actual["sdk832"], rel)
+        b = git_tree_manifest(args.sdk833, actual["sdk833"], rel)
         if a != b:
             only_a = sorted(set(a) - set(b))[:20]
             only_b = sorted(set(b) - set(a))[:20]
