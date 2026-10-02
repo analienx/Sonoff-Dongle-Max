@@ -14,9 +14,10 @@ The planned order is intentionally serial. Do not run multiple firmware changes 
 | V26 | SMLIGHT **20260311** | SDK 8.32.00.07 + SMLIGHT low-level UART/DMA/NPI changes | known failed baseline | yes | vendor only |
 | V25 | SMLIGHT 20250325 | SDK 8.30, vendor test/dev | optional forensic midpoint only; vendor warns about PAN/commissioning | preferably no / controlled only | vendor only |
 | T830-LAB-R0 | pristine TI reference ZNP + MR4U board adaptation | 8.30.01.01 | board/toolchain/protocol smoke | no | no |
-| T830-KCTRL-R0 | TI + reviewed Koenkk coordinator patch set + MR4U + measured capacity | 8.30.01.01 | **primary production control** | yes | no |
-| T830-KDIAG-D0 | same functional config as T830-KCTRL-R0 | 8.30.01.01 | classify reproduced failure | yes | yes |
-| TCUR-KCTRL-R0 | later TI Core SDK with same reviewed coordinator patch philosophy | 8.31/8.33 lineage | SDK-boundary test only if needed | yes | no |
+| T830-KCTRL-R0 | TI + reviewed Koenkk coordinator patch set + MR4U + measured capacity | 8.30.01.01 | **first production control** | yes | no |
+| T832-KCTRL-R0 | same logical control manifest, rebuilt on TI 8.32 | 8.32.00.07 | isolate TI SDK from SMLIGHT downstream | yes | no |
+| T830-KDIAG-D0 | same functional config as T830-KCTRL-R0 | 8.30.01.01 | instrument only if 8.30 is the failing boundary | yes | yes |
+| T832-KDIAG-D0 | same functional config as T832-KCTRL-R0 | 8.32.00.07 | instrument only if 8.32/SMLIGHT boundary is failing | yes | yes |
 | CUSTOM-* | targeted fix | chosen only after evidence | fix proven failure mechanism | eventually | as needed |
 
 The sequence can stop early if an experiment provides a decisive discriminator.
@@ -57,6 +58,33 @@ Koenkk 20240710 source configuration is relevant context, not proof of the SMLIG
 - NPI UART2 completion on `UART2_EVENT_TX_FINISHED`.
 
 SMLIGHT may have modified P10-specific capacity. Runtime evidence on the exact flashed image is authoritative.
+
+
+## 1.2 Custom-control boundary
+
+The custom path is deliberately two-stage:
+
+```
+T830-KCTRL-R0
+    |
+    | same coordinator manifest, board mapping, capacities, baud and host
+    v
+T832-KCTRL-R0
+    |
+    | compare to SMLIGHT 20260311 on the same SDK family
+    v
+SMLIGHT 20260311
+```
+
+Interpretation:
+
+- T830 stable + T832 stable + SMLIGHT hangs -> strongest evidence for SMLIGHT downstream integration.
+- T830 stable + T832 hangs + SMLIGHT hangs -> TI 8.32/Core-SDK interaction becomes primary.
+- T830 hangs + T832 hangs -> common TI/Koenkk coordinator path or production workload.
+- T830 hangs + T832 stable -> inspect 8.30-specific integration before any downstream conclusion.
+
+Do not add diagnostics to either control until this boundary is established.
+
 
 ---
 
