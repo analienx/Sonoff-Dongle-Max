@@ -51,7 +51,7 @@ jobs:
           chmod +x "$SETUP"
           "$SETUP" \
             --mode unattended \
-            --enable-components PF_CC2X \
+            --enable-components PF_WCONN \
             --prefix "$HOME/ti/ccs1280"
 
       - name: Verify and export exact toolchain
