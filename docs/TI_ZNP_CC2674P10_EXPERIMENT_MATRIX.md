@@ -10,21 +10,59 @@ The planned order is intentionally serial. Do not run multiple firmware changes 
 
 | ID | Firmware | SDK lineage | Purpose | Production network? | Instrumented? |
 |---|---|---|---|---:|---:|
-| V24 | SMLIGHT 2024 P10 | record exact image/lineage | current baseline | yes | vendor only |
-| V26 | SMLIGHT 20260310 | current failed baseline | historical evidence captured | yes | vendor only |
-| T830-LAB-R0 | TI reference ZNP | 8.30.01.01 | board/toolchain smoke | no | no |
-| T830-PROD-R0 | TI reference ZNP + MR4U + measured capacity only | 8.30.01.01 | primary control | yes | no |
-| T830-PROD-D0 | same functional config as T830-PROD-R0 | 8.30.01.01 | classify reproduced failure | yes | yes |
-| TCUR-PROD-R0 | later TI F2 control | 8.31/8.33 lineage | SDK boundary, only if needed | yes | no |
-| CUSTOM-* | targeted fix | chosen after evidence | fix proven failure mechanism | eventually | as needed |
+| V24 | SMLIGHT **20240716** | SDK 7.41 | first vendor regression baseline | yes, only after capacity gate | vendor only |
+| V26 | SMLIGHT **20260311** | SDK 8.32.00.07 + SMLIGHT low-level UART/DMA/NPI changes | known failed baseline | yes | vendor only |
+| V25 | SMLIGHT 20250325 | SDK 8.30, vendor test/dev | optional forensic midpoint only; vendor warns about PAN/commissioning | preferably no / controlled only | vendor only |
+| T830-LAB-R0 | pristine TI reference ZNP + MR4U board adaptation | 8.30.01.01 | board/toolchain/protocol smoke | no | no |
+| T830-KCTRL-R0 | TI + reviewed Koenkk coordinator patch set + MR4U + measured capacity | 8.30.01.01 | **primary production control** | yes | no |
+| T830-KDIAG-D0 | same functional config as T830-KCTRL-R0 | 8.30.01.01 | classify reproduced failure | yes | yes |
+| TCUR-KCTRL-R0 | later TI Core SDK with same reviewed coordinator patch philosophy | 8.31/8.33 lineage | SDK-boundary test only if needed | yes | no |
+| CUSTOM-* | targeted fix | chosen only after evidence | fix proven failure mechanism | eventually | as needed |
 
 The sequence can stop early if an experiment provides a decisive discriminator.
+
+
+## 1.1 Hard pre-restore capacity gate for SMLIGHT 20240716
+
+The fresh production backup currently requires:
+
+- 102 coordinator device records;
+- 101 link-key records.
+
+The 20240716 image is a useful stability baseline but its exact SMLIGHT/P10 compiled capacity is not publicly proven.
+
+Therefore **do not restore the production backup immediately after flashing 20240716**.
+
+Required sequence while the newly flashed P10 is still idle/uncommissioned:
+
+1. verify exact firmware revision and 115200 transport;
+2. verify `SYS_PING` / `SYS_VERSION`;
+3. run length-only TCLK NV allocation scan using the fail-closed `p10_nv_lengths.py` logic (or an equivalently reviewed TCP-safe variant);
+4. require **at least 101 provisioned TCLK records**, with a preferred operational gate of >=120 to retain headroom;
+5. if the upper boundary cannot be established or capacity is below the backup requirement, **do not attempt restore**;
+6. rollback to the known 20260311 image and restore the fresh backup if necessary.
+
+This separates firmware-capacity incompatibility from the runtime-hang experiment.
+
+Neighbor/routing capacity cannot be inferred from TCLK capacity. Even if the restore gate passes, 20240716 remains a **crash-stability baseline**, not automatically the best long-term topology firmware.
+
+Koenkk 20240710 source configuration is relevant context, not proof of the SMLIGHT P10 compiled image:
+
+- `MAX_NEIGHBOR_ENTRIES 25`;
+- `NWK_MAX_DEVICE_LIST 50`;
+- `MAX_RTG_ENTRIES 100`;
+- `MAX_RTG_SRC_ENTRIES 250`;
+- `ZDSECMGR_TC_DEVICE_MAX 200`;
+- `NVOCMP_RECOVER_FROM_COMPACT_FAILURE`;
+- NPI UART2 completion on `UART2_EVENT_TX_FINISHED`.
+
+SMLIGHT may have modified P10-specific capacity. Runtime evidence on the exact flashed image is authoritative.
 
 ---
 
 # 2. A/B invariants
 
-For V24 vs T830-PROD-R0, freeze:
+For V24 vs T830-KCTRL-R0, freeze:
 
 - same physical MR4U;
 - same P10 radio silicon;
@@ -45,6 +83,32 @@ For V24 vs T830-PROD-R0, freeze:
 - same synthetic workload schedule when synthetic workload is eventually enabled.
 
 If an invariant changes, record it and treat the run as a new experiment class.
+## 2.1 Forensic invariants specific to the current regression
+
+In addition to the generic A/B invariants, preserve these exact distinctions:
+
+### SMLIGHT 20240716
+
+- SDK 7.41;
+- 115200 baud;
+- vendor production channel;
+- no 20260311-advertised UART abstraction/ring-buffer/DMA-priority/FIFO/task-stack optimization layer.
+
+### SMLIGHT 20260311
+
+- SDK 8.32.00.07;
+- 115200 baud;
+- beta channel;
+- SMLIGHT explicitly advertises:
+  - UART abstraction removal;
+  - P7/P10 RX/TX ring-buffer optimization;
+  - NPI task-stack optimization;
+  - DMA/UART priority optimization;
+  - FIFO-threshold optimization;
+  - custom reset handler/reboot-reason tracking.
+
+The experiment should not change baud rate, Z2M/herdsman version, channel or network identity while comparing these builds.
+
 
 ---
 
@@ -59,7 +123,7 @@ YYYYMMDDTHHMMSSZ-<firmware-id>-<phase>
 Example:
 
 ~~~
-20261005T180000Z-T830-PROD-R0-S1
+20261005T180000Z-T830-KCTRL-R0-S1
 ~~~
 
 Public sanitized manifest fields:
@@ -68,7 +132,7 @@ Public sanitized manifest fields:
 {
   "schema": 1,
   "run_id": "...",
-  "firmware_id": "T830-PROD-R0",
+  "firmware_id": "T830-KCTRL-R0",
   "firmware_sha256": "...",
   "build_manifest_sha256": "...",
   "z2m_version": "...",
@@ -142,20 +206,22 @@ After P2 the lab state is disposable; do not confuse it with production restore 
 
 ## P3 — production restore smoke
 
-Target: T830-PROD-R0.
+Targets: V24 after its capacity gate, then later T830-KCTRL-R0.
 
 No stress.
 
 Required:
 
-- restore;
+- restore only after capacity/identity gates pass;
 - identity;
 - security counts;
 - representative traffic;
 - groupcast;
 - inbound remote;
 - normal Z2M restart once while coordinator healthy;
-- cold restart recovery.
+- reset-domain behavior recorded without intentionally causing a failure.
+
+For V24, explicitly record whether restore consumes all required TCLK/device entries and whether any capacity warning appears.
 
 ## S0 — settle
 
@@ -184,7 +250,7 @@ Goal: detect spontaneous progressive failure.
 Minimum:
 
 ~~~
-max(72 hours, 3 x observed V26 failure interval)
+max(72 hours, 3 x observed 20260311 failure interval)
 ~~~
 
 No synthetic workload if the candidate already fails naturally.
@@ -458,7 +524,7 @@ Do not claim "fixed" after a few hours.
 
 # 11. TI 8.30 production-control acceptance
 
-A T830-PROD-R0 run can enter S1 only if:
+A T830-KCTRL-R0 run can enter S1 only if:
 
 - static image audit passes;
 - capacity evidence passes;
@@ -474,11 +540,11 @@ If an issue appears before S1, classify it as port/restore incompatibility rathe
 
 # 12. Diagnostic-build run
 
-If T830-PROD-R0 reaches F1/F2/F3:
+If T830-KCTRL-R0 reaches F1/F2/F3:
 
 1. preserve release-control crash bundle;
 2. cold recover;
-3. rollback or load T830-PROD-D0;
+3. rollback or load T830-KDIAG-D0;
 4. restore the same network state;
 5. repeat normal-load phase first;
 6. only then reproduce the trigger epoch if needed.
@@ -534,7 +600,7 @@ Strong evidence example:
 ~~~
 V26 fails 3/3 within 4–8 h
 V24 survives 7 d
-T830-PROD-R0 fails 3/3 within 4–8 h
+T830-KCTRL-R0 fails 3/3 within 4–8 h
 ~~~
 
 Weak evidence example:
@@ -678,6 +744,83 @@ Never build a diagnostic/fix image from an uncommitted dirty tree.
 
 Every flashed image must map to exactly one commit and manifest.
 
+
+---
+
+
+# 19. Forensic interpretation hardened after source review
+
+## 19.1 Historical TI/Koenkk crash lesson
+
+The relevant TI E2E investigation established that the SDK 6.20 long-uptime crash could take 3–7 days and was not caused by one single factor. The final stable combination reported by Koen/TI required:
+
+- `NVOCMP_RECOVER_FROM_COMPACT_FAILURE`;
+- changing the problematic UART2 integration path.
+
+Later stable coordinator generations did **not** simply abandon UART2 forever. Koenkk 20240710 uses UART2 but patches NPI completion semantics around `UART2_EVENT_TX_FINISHED`.
+
+Therefore the correct lesson is:
+
+> Treat NV compaction/recovery and NPI UART2 completion/state handling as interacting failure domains. Do not reduce the hypothesis to “memory leak” or “UART2 is broken”.
+
+## 19.2 Exact 20240710 -> 20250321 coordinator changes relevant to our network
+
+Public Koenkk patches show:
+
+| Setting | 20240710 | 20250321 |
+|---|---:|---:|
+| SDK | 7.41.00.17 | 8.30.01.01 |
+| NVOCMP recovery | enabled | enabled |
+| MAC TX data | 50 | 50 |
+| MAC TX max | 80 | 80 |
+| MAC RX max | 50 | 50 |
+| route table | 100 | 150 |
+| source routes | 250 | 250 |
+| route requests | 40 | 40 |
+| direct-device list | 50 | 75 |
+| neighbor table | 25 | 50 |
+| Trust Center devices | 200 | 400 on P10 target, 200 otherwise |
+| UART ISR buffer | SDK/default path | increased 32 -> 128 |
+| NPI TX completion | `UART2_EVENT_TX_FINISHED` patch | retained |
+
+This makes 20240716 useful for **stability regression**, but potentially less representative of the capacity/topology we ultimately want for ~60 routers.
+
+## 19.3 Why SMLIGHT 20250325 is not the preferred next production step
+
+It would be an attractive SDK midpoint, but SMLIGHT itself marks it test/dev and warns about PAN-ID/commissioning problems after flashing.
+
+That means a failure on 20250325 could be:
+
+- migration/layout behavior;
+- commissioning state;
+- capacity/config change;
+- the runtime hang under study.
+
+That is too confounded for the first production A/B. Prefer 20240716 first, then the reproducible T830-KCTRL-R0 control.
+
+## 19.4 Why 20260311 is especially suspicious
+
+TI SDK 8.32.00.07 states that only Wi-SUN changed relative to 8.31.00.11; other SDK components remain the same. The underlying Z-Stack generation remains 8.30.x.
+
+SMLIGHT 20260311, however, explicitly advertises additional low-level UART/DMA/NPI/FIFO/task-stack modifications.
+
+Therefore the highest-value regression boundary is no longer simply:
+
+```
+TI SDK 7.41 vs TI SDK 8.32
+```
+
+It is:
+
+```
+SMLIGHT/Koenkk-style 7.41 coordinator integration
+vs
+TI 8.30 coordinator baseline
+vs
+SMLIGHT 8.32 + custom low-level transport integration
+```
+
+This is the structure future tests must preserve.
 
 ---
 
