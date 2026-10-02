@@ -58,20 +58,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "=== TI compiler candidates ==="
+          find "$HOME/ti/ccs1280" -type f \( -name 'tiarmclang' -o -name 'tiarmclang*' \) -print | sort || true
+          echo "=== SysConfig candidates ==="
+          find "$HOME/ti/ccs1280" \( -type f -name 'sysconfig_cli.sh' -o -type d -name 'sysconfig_*' \) -print | sort || true
+          echo "=== XDCTools candidates ==="
+          find "$HOME/ti/ccs1280" -type d -name 'xdctools*' -print | sort || true
+          echo "=== Eclipse candidates ==="
+          find "$HOME/ti/ccs1280" -type f -name eclipse -perm -u+x -print | sort || true
+
           TIARMCLANG=$(find "$HOME/ti/ccs1280" -type f -name tiarmclang -perm -u+x -print -quit)
           SYSCONFIG=$(find "$HOME/ti/ccs1280" -type f -name sysconfig_cli.sh -print -quit)
           XDC=$(find "$HOME/ti/ccs1280" -type d -name 'xdctools_3_62_01_15_core' -print -quit)
-          CCS_ECLIPSE=$(find "$HOME/ti/ccs1280" -type f -path '*/ccs/eclipse/eclipse' -perm -u+x -print -quit)
+          CCS_ECLIPSE=$(find "$HOME/ti/ccs1280" -type f -name eclipse -path '*/eclipse/eclipse' -perm -u+x -print -quit)
 
-          test -n "$TIARMCLANG"
-          test -n "$SYSCONFIG"
-          test -n "$XDC"
-          test -n "$CCS_ECLIPSE"
+          echo "selected_TIARMCLANG=$TIARMCLANG"
+          echo "selected_SYSCONFIG=$SYSCONFIG"
+          echo "selected_XDC=$XDC"
+          echo "selected_CCS_ECLIPSE=$CCS_ECLIPSE"
+
+          missing=0
+          test -n "$TIARMCLANG" || { echo "::error::TI ARM Clang not installed by CCS PF_WCONN"; missing=1; }
+          test -n "$SYSCONFIG" || { echo "::error::SysConfig CLI not installed by CCS PF_WCONN"; missing=1; }
+          test -n "$XDC" || { echo "::error::Exact XDCTools 3.62.01.15 not installed by CCS PF_WCONN"; missing=1; }
+          test -n "$CCS_ECLIPSE" || { echo "::error::CCS Eclipse executable not found"; missing=1; }
+          test "$missing" = 0
 
           "$TIARMCLANG" --version | tee /tmp/tiarmclang-version.txt
           grep -F '3.2.2.LTS' /tmp/tiarmclang-version.txt
           case "$SYSCONFIG" in *sysconfig_1.21.1*) ;; *) echo "Unexpected SysConfig: $SYSCONFIG"; exit 1;; esac
-          case "$XDC" in *xdctools_3_62_01_15_core*) ;; *) echo "Unexpected XDCTools: $XDC"; exit 1;; esac
 
           {
             echo "TIARMCLANG=$TIARMCLANG"
@@ -247,8 +263,8 @@ jobs:
             echo
             echo "## T832-KCTRL-R0 artifact"
             echo
-            jq -r '"- BIN: (.artifacts["T832-KCTRL-R0.bin"].bytes) bytes — `(.artifacts["T832-KCTRL-R0.bin"].sha256)`"' bundle/T832-BUILD-MANIFEST.json
             jq -r '"- HEX: (.artifacts["T832-KCTRL-R0.hex"].bytes) bytes — `(.artifacts["T832-KCTRL-R0.hex"].sha256)`"' bundle/T832-BUILD-MANIFEST.json
+            echo "- Raw BIN: intentionally not emitted pending explicit CC2674P10/SMLIGHT packaging audit."
             echo "- Flash authorization: **NO** — production safety gates remain separate."
           } >> "$GITHUB_STEP_SUMMARY"
 
