@@ -186,7 +186,6 @@ jobs:
           mkdir -p bundle/linked bundle/generated bundle/provenance
           cp "$OUT" bundle/T832-KCTRL-R0.out
           "$TIARMOBJCOPY" "$OUT" --output-target ihex bundle/T832-KCTRL-R0.hex
-          "$TIARMOBJCOPY" "$OUT" --output-target binary bundle/T832-KCTRL-R0.bin
 
           find ccs-workspace -type f \( -name '*.map' -o -name '*linkInfo.xml' \) -exec cp {} bundle/linked/ \;
           find ccs-workspace -type f \( \
@@ -200,8 +199,9 @@ jobs:
             \) -exec cp {} bundle/generated/ \;
 
           test -s bundle/T832-KCTRL-R0.hex
-          test -s bundle/T832-KCTRL-R0.bin
           test -s bundle/T832-KCTRL-R0.out
+          # Raw .bin is deliberately not emitted here: CC2674P10 CCFG uses an
+          # address alias and binary flattening must be audited separately.
 
       - name: Assemble provenance and integrity evidence
         shell: bash
@@ -226,7 +226,7 @@ jobs:
           from pathlib import Path
           import hashlib, json, os
           artifacts = {}
-          for name in ("T832-KCTRL-R0.bin", "T832-KCTRL-R0.hex", "T832-KCTRL-R0.out"):
+          for name in ("T832-KCTRL-R0.hex", "T832-KCTRL-R0.out"):
               p = Path("bundle") / name
               artifacts[name] = {"bytes": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
           out = {
