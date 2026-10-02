@@ -122,6 +122,40 @@ def run_compat(args: argparse.Namespace) -> None:
     if "--define=NVOCMP_NVPAGES=2" in linker:
         raise SystemExit("project seed still contains conflicting linker NVOCMP_NVPAGES=2")
 
+    project_defines = {
+        match.group(1): (match.group(2) if match.group(2) is not None else "1")
+        for match in re.finditer(
+            r"-D([A-Za-z_]\\w*)(?:=([^\\s]+))?",
+            compiler,
+        )
+    }
+    seed_contract = manifest["project_seed_contract"]
+    inherited_proof: dict[str, Any] = {}
+    for setting in seed_contract["inherited_compile_settings"]:
+        symbol = setting["symbol"]
+        expected_value = str(setting["value"])
+        actual_value = project_defines.get(symbol)
+        if actual_value != expected_value:
+            raise SystemExit(
+                f"project seed define mismatch {symbol}: "
+                f"actual={actual_value!r} expected={expected_value!r}"
+            )
+        inherited_proof[symbol] = {
+            "configured": setting["value"],
+            "projectspec_value": actual_value,
+            "t832_capacity_authority": setting["t832_capacity_authority"],
+            "runtime_scope": setting["runtime_scope"],
+        }
+
+    inactive_features: dict[str, str] = {}
+    for feature in seed_contract["inactive_feature_macros"]:
+        symbol = feature["symbol"]
+        if symbol in project_defines:
+            raise SystemExit(
+                f"inactive T832 seed feature unexpectedly enabled: {symbol}"
+            )
+        inactive_features[symbol] = "absent_from_projectspec_compile_defines"
+
     # Every path directly referenced from the 8.33 project seed must exist in
     # the pinned 8.32 SDK. This proves the seed does not silently depend on an
     # 8.33-only SDK file/directory.
@@ -147,6 +181,8 @@ def run_compat(args: argparse.Namespace) -> None:
             "HEAPMGR_SIZE": 6144,
             "EM_CC2674P10_LP": True,
         },
+        "project_seed_inherited_settings": inherited_proof,
+        "inactive_feature_macros": inactive_features,
         "linker_contract": {"NVOCMP_NVPAGES": 5},
         "result": "PASS",
     }
@@ -286,6 +322,23 @@ def run_build(args: argparse.Namespace) -> None:
             f"linker map does not prove .stack size 0x{mc['c_isr_stack_bytes']:x}"
         )
 
+    forbidden_seed_symbols = {
+        "FEATURE_MAC_SECURITY": ("macSecurityPibDefaults", "macSecurityPibTbl"),
+        "FEATURE_FREQ_HOP_MODE": ("FHPIB_defaults", "FH_PibTbl"),
+    }
+    inactive_link_proof: dict[str, Any] = {}
+    for feature in manifest["project_seed_contract"]["inactive_feature_macros"]:
+        symbol = feature["symbol"]
+        linked = [name for name in forbidden_seed_symbols[symbol] if name in map_text]
+        if linked:
+            raise SystemExit(
+                f"inactive project-seed feature {symbol} appears linked: {linked}"
+            )
+        inactive_link_proof[symbol] = {
+            "forbidden_symbols_checked": list(forbidden_seed_symbols[symbol]),
+            "linked_symbols_found": [],
+        }
+
     if not args.out_file.exists() or args.out_file.stat().st_size == 0:
         raise SystemExit("linked .out artifact missing")
 
@@ -312,6 +365,7 @@ def run_build(args: argparse.Namespace) -> None:
             "stack_proof_lines": stack_lines[:8],
         },
         "ti_release_semantics_overrides": [],
+        "inactive_project_seed_feature_link_proof": inactive_link_proof,
         "mutation_count": len(mutations),
         "result": "PASS",
     }

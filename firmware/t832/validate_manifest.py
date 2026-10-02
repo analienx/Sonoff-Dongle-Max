@@ -85,6 +85,31 @@ def main() -> None:
     if conflict:
         fail(f"KCTRL mutation list overrides preserved TI release semantics: {conflict}")
 
+    seed = data.get("project_seed_contract")
+    if not isinstance(seed, dict):
+        fail("project_seed_contract is required")
+    inherited = seed.get("inherited_compile_settings", [])
+    inactive = seed.get("inactive_feature_macros", [])
+    inherited_symbols = [x.get("symbol") for x in inherited]
+    if len(inherited_symbols) != len(set(inherited_symbols)):
+        fail("duplicate inherited project-seed symbol")
+    required_seed = {"MAX_DEVICE_TABLE_ENTRIES", "HEAPMGR_SIZE", "NVOCMP_NVPAGES"}
+    if set(inherited_symbols) != required_seed:
+        fail(
+            f"project-seed inherited settings mismatch: "
+            f"{sorted(set(inherited_symbols))} != {sorted(required_seed)}"
+        )
+    for setting in inherited:
+        if setting.get("classification") != "INHERITED_SEED":
+            fail(f"invalid project-seed classification: {setting}")
+        if len(setting.get("rationale", "").strip()) < 25:
+            fail(f"project-seed rationale too weak: {setting.get('symbol')}")
+        if not setting.get("proof"):
+            fail(f"project-seed proof missing: {setting.get('symbol')}")
+    inactive_symbols = {x.get("symbol") for x in inactive}
+    if inactive_symbols != {"FEATURE_MAC_SECURITY", "FEATURE_FREQ_HOP_MODE"}:
+        fail(f"inactive project-seed features mismatch: {sorted(inactive_symbols)}")
+
     mc = data["memory_contract"]
     if mc["nvs_pages"] * mc["nvs_page_bytes"] != mc["expected_flash_nv_bytes"]:
         fail("NVS memory contract arithmetic mismatch")

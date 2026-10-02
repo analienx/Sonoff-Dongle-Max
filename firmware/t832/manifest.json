@@ -494,5 +494,57 @@
     "hard-coded RF power experiments",
     "nonessential retry/timing changes",
     "automatic channel/frequency-agility policy changes"
-  ]
+  ],
+  "project_seed_contract": {
+    "inherited_compile_settings": [
+      {
+        "symbol": "MAX_DEVICE_TABLE_ENTRIES",
+        "value": 50,
+        "classification": "INHERITED_SEED",
+        "runtime_scope": "TI 802.15.4 MAC security / frequency-hopping shared code",
+        "t832_capacity_authority": false,
+        "rationale": "The P10 ZNP project seed defines this shared TI MAC ceiling, but FEATURE_MAC_SECURITY and FEATURE_FREQ_HOP_MODE are not enabled by the ZNP seed. Zigbee Trust Center/device capacity is governed separately by ZDSECMGR_TC_DEVICE_MAX and NWK_MAX_DEVICE_LIST.",
+        "proof": [
+          "projectspec_define",
+          "feature_macro_absence",
+          "linked_symbol_absence"
+        ]
+      },
+      {
+        "symbol": "HEAPMGR_SIZE",
+        "value": 6144,
+        "classification": "INHERITED_SEED",
+        "runtime_scope": "Z-Stack OSAL heap",
+        "t832_capacity_authority": true,
+        "rationale": "Inherited from the official P10 ZNP project seed. T832 does not change it in KCTRL; CI records it and the linked image must retain the configured SRAM safety margin after all capacity deltas.",
+        "proof": [
+          "projectspec_define",
+          "linked_build",
+          "linker_memory_margin"
+        ]
+      },
+      {
+        "symbol": "NVOCMP_NVPAGES",
+        "value": 5,
+        "classification": "INHERITED_SEED",
+        "runtime_scope": "NVOCMP/NVS layout",
+        "t832_capacity_authority": true,
+        "rationale": "The compiler-side seed already specifies five NVOCMP pages. T832 separately patches the seed linker-side override from two to five and requires final map proof of 0x2800 FLASH_NV.",
+        "proof": [
+          "projectspec_define",
+          "linker_map_nvs"
+        ]
+      }
+    ],
+    "inactive_feature_macros": [
+      {
+        "symbol": "FEATURE_MAC_SECURITY",
+        "rationale": "Must remain absent; otherwise MAX_DEVICE_TABLE_ENTRIES becomes a live MAC-security table ceiling and its current non-authoritative classification would be invalid."
+      },
+      {
+        "symbol": "FEATURE_FREQ_HOP_MODE",
+        "rationale": "Must remain absent; frequency-hopping shared MAC tables are not part of the 2.4 GHz Zigbee ZNP control."
+      }
+    ]
+  }
 }
