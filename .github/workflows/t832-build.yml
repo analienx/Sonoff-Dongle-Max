@@ -213,6 +213,63 @@ jobs:
           test "$(sha256sum sdk/source/ti/zstack/apps/znp/znp_cnf.opts | cut -d' ' -f1)" = \
                "$(sha256sum "$IMPORTED_OPTS" | cut -d' ' -f1)"
 
+      - name: Pin generated CCS project to SysConfig 1.21.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          workspace = Path("ccs-workspace")
+          wanted = os.environ["SYSCONFIG"]
+          old_fragment = "/ccs/utils/sysconfig_1.21.0/sysconfig_cli.sh"
+          touched = []
+
+          for path in workspace.rglob("*.mk"):
+              text = path.read_text(encoding="utf-8", errors="replace")
+              if old_fragment not in text:
+                  continue
+              # CCS emits an absolute bundled path. Replace that complete token
+              # only; no compiler/link options are changed by this tool pin.
+              parts = text.split()
+              old_paths = sorted({p.strip('"') for p in parts if old_fragment in p})
+              if len(old_paths) != 1:
+                  raise SystemExit(f"{path}: ambiguous SysConfig 1.21.0 paths: {old_paths}")
+              old = old_paths[0]
+              new = text.replace(old, wanted)
+              path.write_text(new, encoding="utf-8")
+              touched.append(str(path))
+
+          if not touched:
+              raise SystemExit("no generated CCS makefile referenced bundled SysConfig 1.21.0")
+
+          remaining = []
+          wanted_refs = []
+          for path in workspace.rglob("*.mk"):
+              text = path.read_text(encoding="utf-8", errors="replace")
+              if "sysconfig_1.21.0/sysconfig_cli.sh" in text:
+                  remaining.append(str(path))
+              if wanted in text:
+                  wanted_refs.append(str(path))
+          if remaining:
+              raise SystemExit(f"bundled SysConfig 1.21.0 still referenced: {remaining}")
+          if not wanted_refs:
+              raise SystemExit("standalone SysConfig 1.21.1 not referenced by generated makefiles")
+
+          evidence = Path("build-evidence/sysconfig-selection.txt")
+          evidence.write_text(
+              "requested=" + wanted + "\n"
+              + "retargeted_makefiles=" + ",".join(sorted(touched)) + "\n"
+              + "remaining_1_21_0=0\n",
+              encoding="utf-8",
+          )
+          print(evidence.read_text())
+          PY
+
+          "$SYSCONFIG" --version 2>&1 | tee -a build-evidence/sysconfig-selection.txt || true
+          grep -R --fixed-strings "$SYSCONFIG" ccs-workspace --include='*.mk'
+
       - name: Build only T832-KCTRL-R0 ZNP project
         shell: bash
         run: |
