@@ -29,8 +29,12 @@
   "toolchain": {
     "ccs": "12.8.0.00012",
     "ti_arm_clang": "3.2.2.LTS",
-    "sysconfig": "1.21.1",
-    "xdctools": "3.62.01.15"
+    "sysconfig": "1.21.1.3772",
+    "xdctools": {
+      "sdk_validated_baseline": "3.62.01.15",
+      "ci_version": "3.62.01.16",
+      "rationale": "CCS 12.8.0 bundles 3.62.01.16; TI support identifies it as good to use in place of 3.62.01.15"
+    }
   },
   "build_identity": {
     "sys_version_product_id": 1,
