@@ -28,7 +28,7 @@ Current work includes:
 
 The TI planning work lives on branch:
 
-`plan/cc2674p10-ti-znp-control`
+`plan/mr4u-p10-ti-znp-control`
 
 The older P009/P013/P015 work belongs to **`sonoff-mg24`**. Those labels are firmware experiment identifiers, **not coordinator models**.
 
