@@ -793,3 +793,173 @@ raw 802.15.4 RCP
 ```
 
 Do not mix the non-Z-Stack research track into the current production recovery experiments.
+
+
+---
+
+# 22. Escape path: move Zigbee stack off the radio
+
+The long-term strategy must not assume that the coordinator must remain a full on-radio Zigbee stack.
+
+The most important alternative discovered during research is **Zigbee-on-Host (ZOH)**.
+
+Architecture:
+
+```
+Zigbee2MQTT / host
+  -> Zigbee NWK + APS + Trust Center + routing/state
+  -> Spinel STREAM_RAW
+  -> OpenThread RCP firmware
+  -> 802.15.4 radio
+```
+
+This removes the ZNP/Z-Stack coordinator application from the radio entirely.
+
+## 22.1 Why this directly addresses issue #73
+
+The observed failure terminates in ZNP command starvation:
+
+```
+AF -> ZDO -> SYS -> no SYS_PING
+```
+
+ZOH has no ZNP command processor and no Zigbee NVOCMP application state on the radio.
+
+The radio performs only the low-level RCP/802.15.4 role while the large and inspectable Zigbee state lives on the host.
+
+This is therefore the strongest architectural test of whether the failure is caused by:
+
+- TI radio/MAC hardware/driver itself; or
+- the Z-Stack/ZNP coordinator application layered on it.
+
+## 22.2 Immediate lab hardware: SLZB-06P7
+
+Koenkk's public OpenThread-TI RCP firmware explicitly supports:
+
+- SMLIGHT SLZB-06P7;
+- SMLIGHT SLZB-07P7;
+- other P7-class TI adapters.
+
+We already own/use the SLZB-06P7 as historical hardware.
+
+Therefore the first ZOH experiment should use the 06P7 rather than modifying the production MR4U/P10.
+
+Planned lab sequence:
+
+1. flash the supported OpenThread RCP image to the isolated 06P7;
+2. run Zigbee2MQTT with `adapter: zoh`;
+3. form a disposable network;
+4. add representative routers/end devices;
+5. test groups, management traffic and high-router-count behavior;
+6. inspect host-side persistence and failure recovery;
+7. stress the host stack without any production-network risk.
+
+## 22.3 Current ZOH maturity
+
+ZOH remains experimental.
+
+Current project status states:
+
+- high CI coverage;
+- stress testing pending;
+- TI firmware stability testing ongoing;
+- live-network usage pending;
+- breaking changes still possible.
+
+Current zigbee-herdsman reports:
+
+```
+ZoHAdapter.supportsBackup() == false
+```
+
+but the adapter also explicitly says the stack handles persistence internally.
+
+ZOH already persists host-side network state, frame counters and application link keys and has tests for restart/save/load behavior.
+
+Therefore the missing production migration feature is best framed as:
+
+> implement and review an Open Coordinator Backup importer/exporter for the ZOH host-side context
+
+rather than “invent backup for the radio”.
+
+This is a potentially smaller task than maintaining a custom Zigbee coordinator firmware.
+
+## 22.4 CC2674P10 RCP status
+
+Koenkk's public OpenThread-TI RCP firmware currently does **not** support CC2674P10.
+
+Issue #9 was answered explicitly by the maintainer: P10 is not supported.
+
+Therefore:
+
+- do not plan to flash a public ZOH RCP image onto MR4U/P10;
+- use 06P7 for the first ZOH lab;
+- treat a P10 RCP build/port as a separate engineering task only after ZOH itself proves useful.
+
+A P10 RCP port would still have a much smaller responsibility surface than a full Z-Stack coordinator image.
+
+## 22.5 Alternative non-Z-Stack production candidates
+
+### deCONZ / ConBee III
+
+Current Zigbee2MQTT documentation still lists deCONZ among recommended adapter families.
+
+Current zigbee-herdsman code now includes:
+
+- `supportsBackup() == true`;
+- Open Coordinator Backup parsing;
+- restore-state handling.
+
+However current deCONZ backup export still has:
+
+```
+devices: []
+```
+
+so full per-device link-key migration from our Z-Stack backup is not yet proven.
+
+Use only after a sacrificial cross-stack restore test.
+
+### ZBOSS
+
+Available experimentally on Nordic and ESP32-C6/H2 platforms.
+
+Current blockers:
+
+- experimental status;
+- `supportsBackup() == false`;
+- incomplete feature support including install codes, channel migration and Inter-PAN.
+
+Not the preferred immediate production escape.
+
+### NXP / ZiGate
+
+Historically unmaintained in Zigbee2MQTT, but 2026 development has resumed with experimental Open Coordinator Backup support built on newer openlumi ZiGate firmware.
+
+Track, but do not choose as the next production target.
+
+## 22.6 Two-track strategy
+
+The coordinator program is now intentionally split:
+
+### Track A — current P10 stabilization
+
+```
+SMLIGHT 20240716
+-> T830-KCTRL
+-> T832-KCTRL
+-> diagnostic build
+```
+
+### Track B — architecture escape
+
+```
+SLZB-06P7
+-> OpenThread RCP
+-> Zigbee-on-Host
+-> OCB importer
+-> large-network stress
+-> production decision
+```
+
+Track B should begin as a lab project even if Track A appears stable, because it tests the entire architectural assumption behind on-radio Zigbee coordinator stacks.
