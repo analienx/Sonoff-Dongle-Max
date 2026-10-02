@@ -1,0 +1,94 @@
+{
+  "variant": "T832-KCTRL-R0",
+  "purpose": "Issue #73 controlled TI 8.32 CC2674P10 ZNP production-control candidate",
+  "target": {
+    "hardware": "SMLIGHT SLZB-MR4U",
+    "radio": "TI CC2674P10",
+    "protocol": "Z-Stack ZNP",
+    "baud": 115200,
+    "hardware_flow_control": false
+  },
+  "sources": {
+    "simplelink_lowpower_f2_sdk": {
+      "repository": "TexasInstruments/simplelink-lowpower-f2-sdk",
+      "tag": "lpf2-8.32.00.07",
+      "commit": "6499c3f53fc5fb5806213be695450a7b43fbaf3d"
+    },
+    "simplelink_zstack_examples": {
+      "repository": "TexasInstruments/simplelink-zstack-examples",
+      "tag": "lpf2-8.33.00.16-zstack",
+      "commit": "87ff5b638b632050228a7504f35cf3b95581c278",
+      "rationale": "P10 ZNP project seed; audited Zigbee/NPI/core source paths are identical between F2 SDK 8.32 and 8.33"
+    },
+    "koenkk_reference": {
+      "repository": "Koenkk/Z-Stack-firmware",
+      "commit": "58dda33d834ef09132427cb41721d7d68e11a7a6",
+      "usage": "semantic reference only; no giant patch/fuzz application"
+    }
+  },
+  "toolchain": {
+    "ccs": "12.8.0.00012",
+    "ti_arm_clang": "3.2.2.LTS",
+    "sysconfig": "1.21.1",
+    "xdctools": "3.62.01.15"
+  },
+  "build_identity": {
+    "sys_version_product_id": 1,
+    "code_revision_number": 8320001,
+    "semantic_label": "T832-KCTRL-R0"
+  },
+  "changes": {
+    "REQUIRED_CORRECTNESS": [
+      "NPI UART2 completion is released only on UART2_EVENT_TX_FINISHED",
+      "UART ISR buffer 32 -> 128",
+      "NVOCMP_RECOVER_FROM_COMPACT_FAILURE enabled",
+      "C/ISR stack -> 4096 bytes"
+    ],
+    "RESTORE_COMPAT": [
+      "FEATURE_NVEXID=1",
+      "MT_SYS_KEY_MANAGEMENT=1"
+    ],
+    "CAPACITY": {
+      "ZDSECMGR_TC_DEVICE_MAX": 400,
+      "MAX_NEIGHBOR_ENTRIES": 50,
+      "MAX_RTG_ENTRIES": 150,
+      "MAX_RTG_SRC_ENTRIES": 250,
+      "MAX_RREQ_ENTRIES": 40,
+      "NWK_MAX_DEVICE_LIST": 75,
+      "MAX_BCAST": 30
+    },
+    "LARGE_NETWORK_BASELINE": {
+      "MAC_CFG_TX_DATA_MAX": 50,
+      "MAC_CFG_TX_MAX": 80,
+      "MAC_CFG_RX_MAX": 50,
+      "NWK_MAX_DATABUFS_WAITING": 48,
+      "NWK_MAX_DATABUFS_SCHEDULED": 30,
+      "NWK_MAX_DATABUFS_CONFIRMED": 30,
+      "NWK_MAX_DATABUFS_TOTAL": 72,
+      "LINK_DOWN_TRIGGER": 12,
+      "NWK_ROUTE_AGE_LIMIT": 5,
+      "DEF_NWK_RADIUS": 15,
+      "DEFAULT_ROUTE_REQUEST_RADIUS": 8,
+      "MTO_RREQ_LIMIT_TIME": 5000,
+      "ROUTE_EXPIRY_TIME": 2,
+      "CONCENTRATOR_ENABLE": true,
+      "CONCENTRATOR_ROUTE_CACHE": true,
+      "CONCENTRATOR_DISCOVERY_TIME": 60,
+      "SRC_RTG_EXPIRY_TIME": 10,
+      "CONFLICTED_ADDR_TABLE_SIZE": 15
+    },
+    "BOARD": [
+      "Use official LP_EM_CC2674P10 project seed",
+      "Do not hard-code RF TX power in KCTRL",
+      "Do not copy SMLIGHT 20260311 low-level UART/DMA/FIFO/task modifications"
+    ]
+  },
+  "forbidden_in_control": [
+    "watchdog auto-recovery",
+    "runtime diagnostics/instrumentation",
+    "experimental fixes",
+    "Koenkk AF/group forwarding behavior changes",
+    "SMLIGHT 20260311 low-level transport optimizations",
+    "hard-coded RF power experiments"
+  ]
+}
