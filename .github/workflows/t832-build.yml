@@ -304,16 +304,32 @@ jobs:
         run: |
           set -euo pipefail
           cat > build-evidence/t832-macro-probe.c <<'EOF'
-          /* T832 evidence-only preprocessor probe. Runtime code is never linked. */
+          /*
+           * T832 evidence-only preprocessor probe. Runtime code is never linked.
+           * Include the exact SysConfig-generated Zigbee header so command-line
+           * KCTRL defines are proven against the same #ifndef defaults used by
+           * the real project.
+           */
+          #include "ti_zstack_config.h"
           EOF
+
+          GENH_DIR="$(dirname "$GENH")"
           "$TIARMCLANG" \
             -dM -E -x c \
+            -I"$GENH_DIR" \
             @"$OPTS" \
             build-evidence/t832-macro-probe.c \
             > build-evidence/effective-macros.txt
 
-          # Keep the generated header that participated in the real project.
+          # Keep the generated header and the exact probe input as evidence.
           cp "$GENH" build-evidence/ti_zstack_config.h
+          {
+            echo "generated_header=$GENH"
+            echo "generated_header_sha256=$(sha256sum "$GENH" | cut -d' ' -f1)"
+            echo "imported_opts=$OPTS"
+            echo "imported_opts_sha256=$(sha256sum "$OPTS" | cut -d' ' -f1)"
+            echo "probe_includes=ti_zstack_config.h"
+          } > build-evidence/macro-probe-contract.txt
 
       - name: Enforce compiled capacity, NVS, stack and SRAM contract
         shell: bash
