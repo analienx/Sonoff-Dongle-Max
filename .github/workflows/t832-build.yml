@@ -28,6 +28,12 @@ jobs:
         with:
           path: repo
 
+      - name: Validate T832 manifest policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 repo/firmware/t832/validate_manifest.py repo/firmware/t832/manifest.json
+
       - name: Install CCS 12.8.0 SimpleLink toolchain
         shell: bash
         run: |
