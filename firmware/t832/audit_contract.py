@@ -125,7 +125,7 @@ def run_compat(args: argparse.Namespace) -> None:
     project_defines = {
         match.group(1): (match.group(2) if match.group(2) is not None else "1")
         for match in re.finditer(
-            r"-D([A-Za-z_]\\w*)(?:=([^\\s]+))?",
+            r"-D([A-Za-z_]\w*)(?:=([^\s]+))?",
             compiler,
         )
     }
