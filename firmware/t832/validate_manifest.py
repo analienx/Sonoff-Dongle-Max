@@ -157,7 +157,6 @@ def main() -> None:
         "restore.project_seed_nvs_pages",
         "headroom.c_isr_stack",
         "build.mt_version_identity",
-        "board.internal_nvs_region",
         "board.remove_launchpad_buttons",
         "board.remove_launchpad_leds",
         "board.remove_launchpad_external_nvs",

@@ -159,8 +159,16 @@ def run_compat(args: argparse.Namespace) -> None:
     if not syscfg.exists():
         raise SystemExit(f"project SysConfig seed missing: {syscfg}")
     syscfg_text = syscfg.read_text(encoding="utf-8")
-    if "NVS1.internalFlash.regionSize = 0x2800;" not in syscfg_text:
-        raise SystemExit("T832 SysConfig seed does not use the five-page 0x2800 internal NVS region")
+    p10_nvs_block = """else if (deviceName.includes("2674") || deviceName.includes("P10") || deviceName.includes("R10"))
+{
+    NVS1.internalFlash.regionBase = 0xFD800;
+    NVS1.internalFlash.regionSize = 0x2800;
+}"""
+    if p10_nvs_block not in syscfg_text:
+        raise SystemExit(
+            "T832 SysConfig seed lost the TI P10-specific NVS contract "
+            "(base 0xFD800, size 0x2800)"
+        )
     forbidden_launchpad = (
         "Button.addInstance", "LED.addInstance", "CONFIG_BTN_", "CONFIG_LED_",
         "CONFIG_NVSEXTERNAL", "CONFIG_SPI_0", "MX25R8035F", "NVS2.",

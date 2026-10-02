@@ -539,21 +539,6 @@
       ]
     },
     {
-      "id": "board.internal_nvs_region",
-      "classification": "BOARD",
-      "kind": "syscfg_patch",
-      "target": "examples:examples/rtos/LP_EM_CC2674P10/zstack/znp/tirtos7/znp.syscfg",
-      "symbol": "CONFIG_NVSINTERNAL.regionSize",
-      "upstream": "0x4000",
-      "configured": "0x2800",
-      "rationale": "Make the SysConfig internal NVS region exactly match the five-page T832 linker/NVOCMP contract instead of the LaunchPad seed's unrelated 16 KiB region.",
-      "proof": [
-        "project_contract",
-        "generated_driver_config",
-        "linker_map_nvs"
-      ]
-    },
-    {
       "id": "board.remove_launchpad_buttons",
       "classification": "BOARD",
       "kind": "syscfg_patch",
@@ -698,7 +683,9 @@
     "internal_nvs": {
       "pages": 5,
       "page_bytes": 2048,
-      "region_bytes": 10240
+      "region_base": "0xFD800",
+      "region_bytes": 10240,
+      "source": "inherited TI P10-specific SysConfig branch; not patched by T832"
     },
     "removed_launchpad_only_components": [
       "BTN-1 / BTN-2 runtime button instances",

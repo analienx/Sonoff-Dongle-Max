@@ -366,14 +366,6 @@ static void NPITLUART_eventCallBack(UART2_Handle handle, uint32_t event, uint32_
     # actually part of the MR4U radio-board contract. All edits remain exact
     # and fail closed against the pinned TI example seed.
     patch.replace_exact(
-        "board.internal_nvs_region",
-        syscfg,
-        "NVS1.internalFlash.regionSize = 0x4000;",
-        "NVS1.internalFlash.regionSize = 0x2800;",
-        detail="internal NVS region 0x4000 -> 0x2800 (five 2 KiB pages)",
-    )
-
-    patch.replace_exact(
         "board.remove_launchpad_buttons",
         syscfg,
         'var Button  = scripting.addModule("/ti/drivers/apps/Button");\n',
@@ -429,7 +421,6 @@ LED2.$name                      = "CONFIG_LED_GREEN";
 LED2.$hardware                  = system.deviceData.board.components.LED_GREEN;
 LED2.gpioPin.$name              = "CONFIG_GPIO_GLED";
 LED2.gpioPin.mode               = "Output";
-
 
 """,
         "",
