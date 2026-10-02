@@ -1,4 +1,5 @@
 {
+  "schema_version": 2,
   "variant": "T832-KCTRL-R0",
   "purpose": "Issue #73 controlled TI 8.32 CC2674P10 ZNP production-control candidate",
   "target": {
@@ -14,11 +15,17 @@
       "tag": "lpf2-8.32.00.07",
       "commit": "6499c3f53fc5fb5806213be695450a7b43fbaf3d"
     },
+    "simplelink_lowpower_f2_sdk_compat_reference": {
+      "repository": "TexasInstruments/simplelink-lowpower-f2-sdk",
+      "tag": "lpf2-8.33.00.16",
+      "commit": "3615ad5d3f4f271258d18a2f5ce1785064ff9a58",
+      "usage": "compatibility comparison only; never compiled into T832"
+    },
     "simplelink_zstack_examples": {
       "repository": "TexasInstruments/simplelink-zstack-examples",
       "tag": "lpf2-8.33.00.16-zstack",
       "commit": "87ff5b638b632050228a7504f35cf3b95581c278",
-      "rationale": "P10 ZNP project seed; audited Zigbee/NPI/core source paths are identical between F2 SDK 8.32 and 8.33"
+      "usage": "LP_EM_CC2674P10 ZNP project seed only; seed delta is explicit in mutations"
     },
     "koenkk_reference": {
       "repository": "Koenkk/Z-Stack-firmware",
@@ -33,66 +40,459 @@
     "xdctools": {
       "sdk_validated_baseline": "3.62.01.15",
       "ci_version": "3.62.01.16",
-      "rationale": "CCS 12.8.0 bundles 3.62.01.16; TI support identifies it as good to use in place of 3.62.01.15"
+      "rationale": "CCS 12.8.0 bundles 3.62.01.16; CI records the exact installed path/version."
     }
   },
-  "build_identity": {
-    "sys_version_product_id": 1,
-    "code_revision_number": 8320001,
-    "semantic_label": "T832-KCTRL-R0"
-  },
-  "changes": {
-    "REQUIRED_CORRECTNESS": [
-      "NPI UART2 completion is released only on UART2_EVENT_TX_FINISHED",
-      "UART ISR buffer 32 -> 128",
-      "NVOCMP_RECOVER_FROM_COMPACT_FAILURE enabled",
-      "C/ISR stack -> 4096 bytes"
+  "compatibility_contract": {
+    "project_seed_device": "Cortex M.CC2674R10",
+    "project_seed_cgt_version": "3.2.2",
+    "required_equal_sdk_paths": [
+      "source/ti/zstack",
+      "source/ti/common/nv",
+      "source/ti/drivers/UART2.h",
+      "source/ti/drivers/uart2",
+      "kernel/tirtos7"
     ],
-    "RESTORE_COMPAT": [
-      "FEATURE_NVEXID=1",
-      "MT_SYS_KEY_MANAGEMENT=1"
-    ],
-    "CAPACITY": {
-      "ZDSECMGR_TC_DEVICE_MAX": 400,
-      "MAX_NEIGHBOR_ENTRIES": 50,
-      "MAX_RTG_ENTRIES": 150,
-      "MAX_RTG_SRC_ENTRIES": 250,
-      "MAX_RREQ_ENTRIES": 40,
-      "NWK_MAX_DEVICE_LIST": 75,
-      "MAX_BCAST": 30
-    },
-    "LARGE_NETWORK_BASELINE": {
-      "MAC_CFG_TX_DATA_MAX": 50,
-      "MAC_CFG_TX_MAX": 80,
-      "MAC_CFG_RX_MAX": 50,
-      "NWK_MAX_DATABUFS_WAITING": 48,
-      "NWK_MAX_DATABUFS_SCHEDULED": 30,
-      "NWK_MAX_DATABUFS_CONFIRMED": 30,
-      "NWK_MAX_DATABUFS_TOTAL": 72,
-      "LINK_DOWN_TRIGGER": 12,
-      "NWK_ROUTE_AGE_LIMIT": 5,
-      "DEF_NWK_RADIUS": 15,
-      "DEFAULT_ROUTE_REQUEST_RADIUS": 8,
-      "MTO_RREQ_LIMIT_TIME": 5000,
-      "ROUTE_EXPIRY_TIME": 2,
-      "CONCENTRATOR_ENABLE": true,
-      "CONCENTRATOR_ROUTE_CACHE": true,
-      "CONCENTRATOR_DISCOVERY_TIME": 60,
-      "SRC_RTG_EXPIRY_TIME": 10,
-      "CONFLICTED_ADDR_TABLE_SIZE": 15
-    },
-    "BOARD": [
-      "Use official LP_EM_CC2674P10 project seed",
-      "Do not hard-code RF TX power in KCTRL",
-      "Do not copy SMLIGHT 20260311 low-level UART/DMA/FIFO/task modifications"
-    ]
+    "required_project_references_exist_in_sdk_832": true,
+    "note": "CI records byte-for-byte equality for critical 8.32 vs 8.33 paths and separately proves that every SDK path referenced by the 8.33 project seed exists in the pinned 8.32 tree."
   },
+  "memory_contract": {
+    "flash_bytes": 1048576,
+    "sram_bytes": 262144,
+    "nvs_page_bytes": 2048,
+    "nvs_pages": 5,
+    "expected_flash_nv_bytes": 10240,
+    "c_isr_stack_bytes": 4096,
+    "heapmgr_size_bytes": 6144,
+    "minimum_linker_free_sram_bytes": 8192,
+    "rationale": "The first successful linked map must retain at least 8 KiB unallocated SRAM after static allocations; this is a fail-closed control-build floor, not a performance target."
+  },
+  "control_semantics": {
+    "preserve_ti_release_defaults": [
+      "LINK_DOWN_TRIGGER",
+      "NWK_ROUTE_AGE_LIMIT",
+      "DEF_NWK_RADIUS",
+      "DEFAULT_ROUTE_REQUEST_RADIUS",
+      "ZDNWKMGR_MIN_TRANSMISSIONS",
+      "ROUTE_DISCOVERY_TIME",
+      "MTO_RREQ_LIMIT_TIME",
+      "ROUTE_EXPIRY_TIME",
+      "NWK_INDIRECT_MSG_TIMEOUT",
+      "ZMAC_MAX_FRAME_RETRIES",
+      "NWK_MAX_DATA_RETRIES",
+      "MULTICAST_ENABLED",
+      "APSC_ACK_WAIT_DURATION_POLLED",
+      "SRC_RTG_EXPIRY_TIME"
+    ],
+    "rationale": "KCTRL is a release-control experiment. Retry, route-expiry, multicast and unrelated timing changes are intentionally excluded so they cannot mask or create issue #73 behavior."
+  },
+  "mutations": [
+    {
+      "id": "build.code_revision",
+      "classification": "BUILD_ID",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "CODE_REVISION_NUMBER",
+      "upstream": null,
+      "configured": "8320001",
+      "rationale": "Give the control image a unique non-SMLIGHT numeric revision that is traceable to T832-KCTRL-R0.",
+      "proof": [
+        "effective_macros",
+        "mt_version_linked"
+      ]
+    },
+    {
+      "id": "correctness.nvocmp_recover",
+      "classification": "REQUIRED_CORRECTNESS",
+      "kind": "compile_define_flag",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "NVOCMP_RECOVER_FROM_COMPACT_FAILURE",
+      "upstream": "disabled",
+      "configured": "defined",
+      "rationale": "Enable TI's customer-opt-in recovery path for NVOCMP compaction failure; historical coordinator stability work identifies this path as relevant to long-running failures.",
+      "proof": [
+        "effective_macros",
+        "compile_assert"
+      ]
+    },
+    {
+      "id": "restore.nvexid",
+      "classification": "RESTORE_COMPAT",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "FEATURE_NVEXID",
+      "upstream": null,
+      "configured": "1",
+      "rationale": "Expose extended NV identifiers required by the backup/restore tooling contract.",
+      "proof": [
+        "effective_macros",
+        "compile_assert"
+      ]
+    },
+    {
+      "id": "restore.mt_sys_key_management",
+      "classification": "RESTORE_COMPAT",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "MT_SYS_KEY_MANAGEMENT",
+      "upstream": null,
+      "configured": "1",
+      "rationale": "Expose MT key-management operations required to preserve Trust Center/security state during controlled restore.",
+      "proof": [
+        "effective_macros",
+        "compile_assert"
+      ]
+    },
+    {
+      "id": "capacity.tc_devices",
+      "classification": "CAPACITY",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "ZDSECMGR_TC_DEVICE_MAX",
+      "upstream": "40",
+      "configured": "400",
+      "rationale": "Provide Trust Center device/key capacity well above the current ~100-device network so security state is not the limiting resource.",
+      "proof": [
+        "effective_macros",
+        "compile_assert",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "capacity.broadcast_table",
+      "classification": "CAPACITY",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "MAX_BCAST",
+      "upstream": "9",
+      "configured": "30",
+      "rationale": "Increase concurrent broadcast-table capacity for a dense router network without changing broadcast retry/timing semantics.",
+      "proof": [
+        "effective_macros",
+        "compile_assert",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "capacity.neighbors",
+      "classification": "CAPACITY",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "MAX_NEIGHBOR_ENTRIES",
+      "upstream": "16",
+      "configured": "50",
+      "rationale": "Raise the coordinator neighbor table above TI's small-network default for a network with ~60 mains routers.",
+      "proof": [
+        "effective_macros",
+        "compile_assert",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "capacity.routes",
+      "classification": "CAPACITY",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "MAX_RTG_ENTRIES",
+      "upstream": "40",
+      "configured": "150",
+      "rationale": "Increase regular route-table headroom while leaving TI route aging, expiry and retry semantics unchanged.",
+      "proof": [
+        "effective_macros",
+        "compile_assert",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "capacity.source_routes",
+      "classification": "CAPACITY",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "MAX_RTG_SRC_ENTRIES",
+      "upstream": "12",
+      "configured": "250",
+      "rationale": "Provide source-route table capacity for many-to-one routing across a ~60-router production topology.",
+      "proof": [
+        "effective_macros",
+        "compile_assert",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "capacity.route_requests",
+      "classification": "CAPACITY",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "MAX_RREQ_ENTRIES",
+      "upstream": "8",
+      "configured": "40",
+      "rationale": "Allow more simultaneous route discoveries under large-network load without changing discovery timing.",
+      "proof": [
+        "effective_macros",
+        "compile_assert",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "capacity.device_list",
+      "classification": "CAPACITY",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "NWK_MAX_DEVICE_LIST",
+      "upstream": "20",
+      "configured": "75",
+      "rationale": "Raise the association/device-list ceiling above TI's default; final production acceptance must compare this value with measured direct association demand.",
+      "proof": [
+        "effective_macros",
+        "compile_assert",
+        "linker_memory_margin",
+        "capacity_gate"
+      ]
+    },
+    {
+      "id": "capacity.conflicted_addresses",
+      "classification": "CAPACITY",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "CONFLICTED_ADDR_TABLE_SIZE",
+      "upstream": "3",
+      "configured": "15",
+      "rationale": "TI source explicitly recommends scaling this table for networks over 100 nodes; 15 follows the reviewed large-network coordinator baseline.",
+      "proof": [
+        "effective_macros",
+        "compile_assert",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "baseline.concentrator_enable",
+      "classification": "LARGE_NETWORK_BASELINE",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "CONCENTRATOR_ENABLE",
+      "upstream": "false",
+      "configured": "TRUE",
+      "rationale": "Operate the coordinator as a many-to-one concentrator so source-route behavior exercised in production is represented by the control build.",
+      "proof": [
+        "effective_macros",
+        "compile_assert"
+      ]
+    },
+    {
+      "id": "baseline.concentrator_route_cache",
+      "classification": "LARGE_NETWORK_BASELINE",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "CONCENTRATOR_ROUTE_CACHE",
+      "upstream": "false",
+      "configured": "TRUE",
+      "rationale": "Use concentrator route-cache mode required by the intended source-routing coordinator baseline.",
+      "proof": [
+        "effective_macros",
+        "compile_assert"
+      ]
+    },
+    {
+      "id": "baseline.concentrator_discovery_time",
+      "classification": "LARGE_NETWORK_BASELINE",
+      "kind": "compile_define",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "CONCENTRATOR_DISCOVERY_TIME",
+      "upstream": "0",
+      "configured": "60",
+      "rationale": "Schedule periodic concentrator discovery at the reviewed coordinator-baseline interval; this is the only retained routing-timing delta because it is intrinsic to the enabled concentrator mode.",
+      "proof": [
+        "effective_macros",
+        "compile_assert"
+      ]
+    },
+    {
+      "id": "headroom.mac_tx_data",
+      "classification": "LARGE_NETWORK_BASELINE",
+      "kind": "compile_define_replace",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "MAC_CFG_TX_DATA_MAX",
+      "upstream": "5",
+      "configured": "50",
+      "rationale": "Increase MAC TX data buffer headroom for bursty coordinator traffic; this changes capacity, not retry policy.",
+      "proof": [
+        "effective_macros",
+        "compile_assert",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "headroom.mac_tx",
+      "classification": "LARGE_NETWORK_BASELINE",
+      "kind": "compile_define_replace",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "MAC_CFG_TX_MAX",
+      "upstream": "8",
+      "configured": "80",
+      "rationale": "Increase MAC TX buffer headroom for sustained coordinator load.",
+      "proof": [
+        "effective_macros",
+        "compile_assert",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "headroom.mac_rx",
+      "classification": "LARGE_NETWORK_BASELINE",
+      "kind": "compile_define_replace",
+      "target": "sdk:source/ti/zstack/apps/znp/znp_cnf.opts",
+      "symbol": "MAC_CFG_RX_MAX",
+      "upstream": "5",
+      "configured": "50",
+      "rationale": "Increase MAC RX buffer headroom for a dense router network.",
+      "proof": [
+        "effective_macros",
+        "compile_assert",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "headroom.uart_isr_buffer",
+      "classification": "LARGE_NETWORK_BASELINE",
+      "kind": "source_define",
+      "target": "sdk:source/ti/zstack/npi/npi_tl_uart.h",
+      "symbol": "UART_ISR_BUF_SIZE",
+      "upstream": "32",
+      "configured": "128",
+      "rationale": "Increase the NPI UART ISR buffer to reduce burst-pressure risk without changing UART framing or flow control.",
+      "proof": [
+        "source_compile_assert",
+        "linked_build"
+      ]
+    },
+    {
+      "id": "correctness.uart_tx_finished",
+      "classification": "REQUIRED_CORRECTNESS",
+      "kind": "source_patch",
+      "target": "sdk:source/ti/zstack/npi/npi_tl_uart.c",
+      "symbol": "NPITLUART_eventCallBack",
+      "upstream": "completion from UART2 write callback",
+      "configured": "completion from UART2_EVENT_TX_FINISHED",
+      "rationale": "Do not release NPI transmit state until the driver reports the final byte physically transmitted; this directly targets the UART/NPI completion ambiguity relevant to the observed SRSP starvation.",
+      "proof": [
+        "source_diff",
+        "linked_build"
+      ]
+    },
+    {
+      "id": "headroom.nwk_waiting",
+      "classification": "LARGE_NETWORK_BASELINE",
+      "kind": "source_define",
+      "target": "sdk:source/ti/zstack/stack/nwk/nwk_globals.c",
+      "symbol": "NWK_MAX_DATABUFS_WAITING",
+      "upstream": "8",
+      "configured": "48",
+      "rationale": "Increase queued NWK buffers waiting for MAC under burst load.",
+      "proof": [
+        "source_compile_assert",
+        "linked_build",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "headroom.nwk_scheduled",
+      "classification": "LARGE_NETWORK_BASELINE",
+      "kind": "source_define",
+      "target": "sdk:source/ti/zstack/stack/nwk/nwk_globals.c",
+      "symbol": "NWK_MAX_DATABUFS_SCHEDULED",
+      "upstream": "5",
+      "configured": "30",
+      "rationale": "Increase scheduled NWK buffer headroom under concurrent traffic.",
+      "proof": [
+        "source_compile_assert",
+        "linked_build",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "headroom.nwk_confirmed",
+      "classification": "LARGE_NETWORK_BASELINE",
+      "kind": "source_define",
+      "target": "sdk:source/ti/zstack/stack/nwk/nwk_globals.c",
+      "symbol": "NWK_MAX_DATABUFS_CONFIRMED",
+      "upstream": "5",
+      "configured": "30",
+      "rationale": "Increase post-MAC-confirm buffer headroom under concurrent traffic.",
+      "proof": [
+        "source_compile_assert",
+        "linked_build",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "headroom.nwk_total",
+      "classification": "LARGE_NETWORK_BASELINE",
+      "kind": "source_define",
+      "target": "sdk:source/ti/zstack/stack/nwk/nwk_globals.c",
+      "symbol": "NWK_MAX_DATABUFS_TOTAL",
+      "upstream": "12",
+      "configured": "72",
+      "rationale": "Raise the aggregate NWK data-buffer ceiling consistently with the component queues.",
+      "proof": [
+        "source_compile_assert",
+        "linked_build",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "headroom.c_isr_stack",
+      "classification": "LARGE_NETWORK_BASELINE",
+      "kind": "linker_option",
+      "target": "sdk:source/ti/zstack/boards/cc13x4_cc26x4/cc13x4_cc26x4_tirtos7_ticlang.cmd",
+      "symbol": "--stack_size",
+      "upstream": [
+        "0x600",
+        "1024"
+      ],
+      "configured": "4096",
+      "rationale": "Reserve 4 KiB for the shared C/ISR stack and prove the effective allocation in the linked map.",
+      "proof": [
+        "linker_map_stack",
+        "linker_memory_margin"
+      ]
+    },
+    {
+      "id": "build.mt_version_identity",
+      "classification": "BUILD_ID",
+      "kind": "source_patch",
+      "target": "sdk:source/ti/zstack/mt/mt_version.c",
+      "symbol": "MTVersionString",
+      "upstream": "product_id=0, no CODE_REVISION_NUMBER bytes",
+      "configured": "product_id=1 plus 32-bit CODE_REVISION_NUMBER",
+      "rationale": "Make T832 unmistakable through SYS_VERSION and bind the image to the manifest revision.",
+      "proof": [
+        "compile_assert",
+        "linked_build"
+      ]
+    },
+    {
+      "id": "restore.project_seed_nvs_pages",
+      "classification": "RESTORE_COMPAT",
+      "kind": "projectspec_patch",
+      "target": "examples:examples/rtos/LP_EM_CC2674P10/zstack/znp/tirtos7/ticlang/znp_LP_EM_CC2674P10_tirtos7_ticlang.projectspec",
+      "symbol": "linker --define=NVOCMP_NVPAGES",
+      "upstream": "2",
+      "configured": "5",
+      "rationale": "The 8.33 P10 seed declares 5 NV pages to the compiler but 2 to the linker. T832 requires a single 5-page NVS contract matching the pinned 8.32 linker layout (FLASH_NV size 0x2800).",
+      "proof": [
+        "project_contract",
+        "linker_map_nvs"
+      ]
+    }
+  ],
   "forbidden_in_control": [
     "watchdog auto-recovery",
     "runtime diagnostics/instrumentation",
     "experimental fixes",
     "Koenkk AF/group forwarding behavior changes",
     "SMLIGHT 20260311 low-level transport optimizations",
-    "hard-coded RF power experiments"
+    "hard-coded RF power experiments",
+    "nonessential retry/timing changes",
+    "automatic channel/frequency-agility policy changes"
   ]
 }

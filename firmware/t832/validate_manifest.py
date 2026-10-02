@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Static schema/policy validation for the T832 control manifest."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+
+ALLOWED = {
+    "REQUIRED_CORRECTNESS",
+    "RESTORE_COMPAT",
+    "CAPACITY",
+    "LARGE_NETWORK_BASELINE",
+    "BOARD",
+    "BUILD_ID",
+    "DIAGNOSTIC",
+    "EXPERIMENTAL_FIX",
+}
+COMPILED_PROOFS = {
+    "effective_macros",
+    "compile_assert",
+    "source_compile_assert",
+    "linked_build",
+    "linker_map_stack",
+    "linker_map_nvs",
+    "linker_memory_margin",
+    "project_contract",
+}
+
+
+def fail(message: str) -> None:
+    raise SystemExit(message)
+
+
+def main() -> None:
+    path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("manifest.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema_version") != 2:
+        fail("manifest schema_version must be 2")
+    if data.get("variant") != "T832-KCTRL-R0":
+        fail("unexpected manifest variant")
+
+    mutations = data.get("mutations")
+    if not isinstance(mutations, list) or not mutations:
+        fail("manifest mutations must be a non-empty list")
+
+    ids: set[str] = set()
+    symbols: set[str] = set()
+    compile_symbols: set[str] = set()
+    for m in mutations:
+        for key in ("id", "classification", "kind", "target", "rationale", "proof"):
+            if key not in m:
+                fail(f"mutation missing {key}: {m}")
+        if m["id"] in ids:
+            fail(f"duplicate mutation id: {m['id']}")
+        ids.add(m["id"])
+        if m["classification"] not in ALLOWED:
+            fail(f"invalid classification for {m['id']}: {m['classification']}")
+        if m["classification"] == "EXPERIMENTAL_FIX":
+            fail(f"EXPERIMENTAL_FIX is forbidden in KCTRL: {m['id']}")
+        if len(m["rationale"].strip()) < 25:
+            fail(f"rationale too weak for {m['id']}")
+        if not isinstance(m["proof"], list) or not m["proof"]:
+            fail(f"proof contract missing for {m['id']}")
+        if m["classification"] in {"CAPACITY", "LARGE_NETWORK_BASELINE"}:
+            if not (set(m["proof"]) & COMPILED_PROOFS):
+                fail(f"capacity/baseline mutation lacks compiled proof: {m['id']}")
+
+        symbol = m.get("symbol")
+        if symbol:
+            symbols.add(symbol)
+        if m["kind"] in {"compile_define", "compile_define_flag", "compile_define_replace"}:
+            if not symbol:
+                fail(f"compile mutation missing symbol: {m['id']}")
+            if symbol in compile_symbols:
+                fail(f"compile symbol configured twice: {symbol}")
+            compile_symbols.add(symbol)
+
+    preserved = data["control_semantics"]["preserve_ti_release_defaults"]
+    if len(preserved) != len(set(preserved)):
+        fail("preserved TI semantic symbols contain duplicates")
+    conflict = sorted(set(preserved) & compile_symbols)
+    if conflict:
+        fail(f"KCTRL mutation list overrides preserved TI release semantics: {conflict}")
+
+    mc = data["memory_contract"]
+    if mc["nvs_pages"] * mc["nvs_page_bytes"] != mc["expected_flash_nv_bytes"]:
+        fail("NVS memory contract arithmetic mismatch")
+    if mc["c_isr_stack_bytes"] != 4096:
+        fail("T832 stack contract must remain 4096 bytes")
+    if mc["minimum_linker_free_sram_bytes"] <= 0:
+        fail("SRAM margin gate must be positive")
+
+    required_ids = {
+        "correctness.uart_tx_finished",
+        "correctness.nvocmp_recover",
+        "restore.nvexid",
+        "restore.mt_sys_key_management",
+        "restore.project_seed_nvs_pages",
+        "headroom.c_isr_stack",
+        "build.mt_version_identity",
+    }
+    missing = sorted(required_ids - ids)
+    if missing:
+        fail(f"required control mutations missing: {missing}")
+
+    print(
+        json.dumps(
+            {
+                "result": "PASS",
+                "variant": data["variant"],
+                "mutation_count": len(mutations),
+                "compile_define_count": len(compile_symbols),
+                "preserved_ti_semantic_count": len(preserved),
+            },
+            indent=2,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()
