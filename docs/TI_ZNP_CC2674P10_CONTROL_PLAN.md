@@ -9,19 +9,24 @@
 
 ## 0. Executive decision
 
-The next firmware experiment after the SMLIGHT 2024 baseline will be a **Texas Instruments reference ZNP control experiment** for CC2674P10.
+The next firmware investigation after the SMLIGHT 20240716 baseline is a **layered CC2674P10 control experiment**, not a single “vanilla TI” production image.
 
-The experiment is deliberately split into three artifacts:
+Forensic review found that coordinator stability depends on known, explicit coordinator patches that are not equivalent to TI application defaults. In particular, the Koenkk stable lineage enables `NVOCMP_RECOVER_FROM_COMPACT_FAILURE` and changes NPI UART2 completion handling to wait for `UART2_EVENT_TX_FINISHED`. TI itself has documented multiple UART2 race/completion bugs across SDK generations.
 
-1. **TI-VANILLA-LAB** — TI reference ZNP with no production-capacity tuning; used only for build/transport/board validation on an isolated radio.
-2. **TI-PROD-CONTROL** — same TI reference stack, with only:
-   - MR4U board adaptation,
-   - explicit production-capacity settings proven necessary by the retained network state,
-   - build identity/provenance.
-   No diagnostic or behavioral fixes.
-3. **TI-PROD-DIAG** — bit-for-bit configuration equivalent to TI-PROD-CONTROL except for diagnostic instrumentation needed to classify a reproduced hang.
+The experiment is therefore deliberately split into three artifacts:
 
-The production control is the important A/B discriminator. It must remain intentionally boring. If it contains speculative fixes, it ceases to be a control.
+1. **TI-VANILLA-LAB** — pristine TI reference ZNP plus only MR4U board adaptation/build identity. Used only for isolated toolchain, transport, reset, RF and protocol validation. It is **not** the first production control.
+2. **TI-KOENKK-CONTROL** — TI SDK 8.30.01.01 plus a mechanically reviewed, minimal coordinator patch set derived from Koenkk 20250321, then MR4U board adaptation and measured production capacities. This is the primary production discriminator against SMLIGHT 20260311.
+3. **TI-KOENKK-DIAG** — functionally identical to TI-KOENKK-CONTROL except for evidence-only diagnostic instrumentation needed to classify a reproduced hang.
+
+The production control must remain intentionally boring: only upstream TI, the explicitly enumerated coordinator-stability/compatibility patch set, MR4U board support, measured capacity and build identity. No speculative “fixes” are allowed.
+
+Why not deploy pure TI defaults to production first?
+
+- TI NVOCMP recovery from compaction failure is customer-enabled, not a safe assumption.
+- Historical TI/Koenkk investigation found the crash family required more than one interacting change.
+- Koenkk 20240710 and 20250321 both carry explicit NPI UART2 TX-finished handling beyond the raw SDK project.
+- A pure-TI production failure would therefore be ambiguous: it could simply reintroduce a previously known coordinator integration defect rather than isolate the SMLIGHT 20260311 regression.
 
 ---
 
@@ -50,7 +55,7 @@ Strongly increases probability of a defect in:
 - scheduler/resource interaction common to both vendor and TI reference builds,
 - workload-triggered silicon/SDK interaction.
 
-Next action: reproduce on TI-PROD-DIAG and identify the internal failure mechanism.
+Next action: reproduce on TI-KOENKK-DIAG and identify the internal failure mechanism.
 
 ### Outcome B — TI control remains stable while the matching SMLIGHT build hangs
 
@@ -86,7 +91,7 @@ The control experiment is **not**:
 - a place to combine fixes for unrelated device/group/binding problems;
 - a reason to expose Zigbee keys or device IEEE lists in git.
 
-No custom resource-management changes are allowed in TI-PROD-CONTROL.
+No custom resource-management changes are allowed in TI-KOENKK-CONTROL.
 
 ---
 
@@ -135,6 +140,20 @@ Do not substitute a P7 project unless the exact pinned SDK unexpectedly lacks th
 TI's current public F2 SDK is 8.33.00.16. TI states its non-Wi-SUN components remain the same as 8.31.00.11.
 
 A later `TI-CURRENT-CONTROL` can be useful, but it is not the first control. Adding a second SDK before the 8.30 control is understood would confound the experiment.
+
+## 3.4 Forensic provenance ladder established before implementation
+
+The vendor and upstream lineage currently known is:
+
+| Build | SDK | Status | Key evidence |
+|---|---|---|---|
+| SMLIGHT 20240716 | 7.41 | production | last SMLIGHT production release before newer dev/beta line; based on the Koenkk 20240710 generation plus P10/SMLIGHT adaptation |
+| Koenkk 20240710 | 7.41.00.17 | released | `NVOCMP_RECOVER_FROM_COMPACT_FAILURE`, UART2 TX-finished event handling, large-network table/buffer tuning |
+| SMLIGHT 20250325 | 8.30 | test/dev | vendor warns about PAN-ID / commissioning problems; not suitable as the first production A/B |
+| Koenkk 20250321 | 8.30.01.01 | released for established chips; P10 upstream WIP | updated UART ISR buffer, TX-finished semantics retained, larger routing/device capacities, P10-specific trust-center target |
+| SMLIGHT 20260311 | 8.32.00.07 | beta | failing observed build; custom low-level UART/DMA/NPI/FIFO/task/reset changes |
+
+This ladder is why SMLIGHT 20250325 is **not** the preferred midpoint despite its forensic value. Its vendor-documented migration/commissioning risk adds a confounder. The cleaner midpoint is our reproducible TI 8.30 + reviewed Koenkk coordinator-control build.
 
 ---
 
@@ -436,39 +455,86 @@ Rules:
 
 This image may be tested only on an isolated/spare P10 or during an explicitly isolated bench window.
 
-## 9.2 TI-PROD-CONTROL
+## 9.2 TI-KOENKK-CONTROL
 
-Purpose: production A/B control.
+Purpose: production A/B control that removes SMLIGHT-specific 20260311 low-level changes while retaining known coordinator-stability behavior.
 
-Permitted changes from TI reference:
+Baseline:
 
-1. verified MR4U board adaptation;
-2. capacity settings required by measured production demand;
-3. build fingerprint/version identification;
-4. only changes necessary for Zigbee2MQTT/herdsman ZNP compatibility if the TI reference is not already compatible — each such change requires separate review.
+- TI SimpleLink Low Power F2 SDK 8.30.01.01;
+- official CC2674P10 ZNP project;
+- TI Clang / TI-RTOS7;
+- a minimal patch set mechanically derived from Koenkk `Z-Stack_3.x.0_coordinator_20250321`.
+
+The patch set must be reviewed line-by-line and classified. Initial expected coordinator-critical items include:
+
+1. `NVOCMP_RECOVER_FROM_COMPACT_FAILURE`;
+2. extended MT/NV/security APIs required by modern backup/restore;
+3. NPI UART2 completion semantics using `UART2_EVENT_TX_FINISHED`;
+4. UART ISR-buffer change only if present in the exact reviewed 20250321 patch and required by that transport implementation;
+5. coordinator MAC/AF buffering and routing parameters only where they are part of the exact known coordinator baseline;
+6. measured P10 production-capacity settings;
+7. verified MR4U board/RF/UART/CCFG adaptation;
+8. unambiguous build fingerprint.
+
+Every imported Koenkk line must be represented in a machine-readable patch manifest:
+
+```
+upstream_path
+upstream_commit/tag
+patch_hunk_hash
+classification
+why_required
+behavioral_effect
+keep/drop decision
+```
+
+The objective is **not** to copy Koenkk wholesale. It is to make every difference from TI upstream explicit and reproducible.
 
 Forbidden:
 
-- speculative buffer increases unrelated to measured capacity;
+- SMLIGHT 20260311 proprietary UART/DMA/FIFO/task optimizations;
+- speculative buffer increases not tied to either the reviewed coordinator baseline or measured production demand;
 - watchdog auto-restart logic;
-- queue backpressure patches;
+- custom queue backpressure;
 - custom heap allocator;
-- extra retries;
-- timing changes;
-- custom diagnostics;
-- route tuning introduced merely because we suspect routing;
-- feature removal solely to improve stability.
+- experimental retry/timing changes;
+- diagnostics that alter scheduling/timing materially;
+- route tuning introduced merely because routing is suspected;
+- undocumented source patches.
 
-## 9.3 TI-PROD-DIAG
+### Why this is a better control than pure TI
 
-Must inherit the **same board, Zigbee, capacity, RF and network configuration** as TI-PROD-CONTROL.
+SMLIGHT 20260311 explicitly advertises custom changes in the exact failure path:
 
-Only diagnostic deltas are allowed.
+- UART abstraction removal;
+- P7/P10 RX/TX ring-buffer optimization;
+- NPI task-stack optimization;
+- DMA/UART priority changes;
+- FIFO-threshold changes;
+- custom reset handling.
+
+TI-KOENKK-CONTROL removes that downstream layer while keeping a known coordinator-oriented integration baseline. If this control remains stable while 20260311 hangs, suspicion shifts strongly toward SMLIGHT-specific integration or SDK-8.32 interaction. If it also hangs, the common TI/Koenkk coordinator path remains suspect.
+
+## 9.3 TI-KOENKK-DIAG
+
+Must inherit the **same board, Zigbee, capacity, RF, NPI behavior and network configuration** as TI-KOENKK-CONTROL.
+
+Only evidence-producing diagnostic deltas are allowed.
 
 The diag build is deployed only after:
 
 - the release control reproduces the hang; or
-- the release control stays stable long enough that a targeted stress reproduction is justified.
+- the release control remains stable long enough that a controlled trigger-reproduction campaign is justified.
+
+The first diagnostic targets are now ordered:
+
+1. NPI UART2 TX/RX state, event callbacks, TX-active flag, DMA/FIFO status;
+2. NVOCMP compaction begin/end/failure/recovery state;
+3. OSAL/RTOS heap and stack watermarks;
+4. AF/MAC/ZDO pending resources;
+5. route/MTO traffic counters;
+6. fault/error-spin/reset breadcrumbs.
 
 ---
 
@@ -735,7 +801,7 @@ Do not use production devices merely to make the lab checklist convenient.
 
 # 17. Production smoke acceptance
 
-Immediately after restore to TI-PROD-CONTROL:
+Immediately after restore to TI-KOENKK-CONTROL:
 
 ### Network identity
 
@@ -965,7 +1031,7 @@ Do not re-pair devices as a normal rollback technique.
 
 # 23. Decision table
 
-| 2024 vendor | TI-PROD-CONTROL | TI-PROD-DIAG | Interpretation |
+| 2024 vendor | TI-KOENKK-CONTROL | TI-KOENKK-DIAG | Interpretation |
 |---|---|---|---|
 | stable | stable | not needed | regression likely in newer vendor lineage; continue longer soak |
 | stable | hangs | reproduces/classifies | TI 8.30 reference/common stack path suspect |
