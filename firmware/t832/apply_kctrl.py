@@ -24,6 +24,21 @@ def sha256_path(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def read_text_preserve_newlines(path: Path) -> str:
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def write_text_preserve_newlines(path: Path, text: str) -> None:
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+
+
+def native_newlines(reference: str, block: str) -> str:
+    """Adapt LF-authored exact-match templates to the target file newline."""
+    return block.replace("\n", "\r\n") if "\r\n" in reference else block
+
+
 def git_head(path: Path) -> str:
     return subprocess.run(
         ["git", "-C", str(path), "rev-parse", "HEAD"],
@@ -72,13 +87,17 @@ class Patcher:
         count: int = 1,
         detail: str,
     ) -> None:
-        text = path.read_text(encoding="utf-8")
-        actual = text.count(old)
+        text = read_text_preserve_newlines(path)
+        old_native = native_newlines(text, old)
+        new_native = native_newlines(text, new)
+        actual = text.count(old_native)
         if actual != count:
             raise SystemExit(
                 f"{path}: {mutation_id}: expected {count} occurrence(s), found {actual}"
             )
-        path.write_text(text.replace(old, new, count), encoding="utf-8")
+        write_text_preserve_newlines(
+            path, text.replace(old_native, new_native, count)
+        )
         self.record(mutation_id, path, detail)
 
 
@@ -145,10 +164,14 @@ def apply(sdk: Path, examples: Path, manifest_path: Path) -> dict[str, Any]:
     ]
     marker = "-DMT_APP_CNF_FUNC\n"
     block = marker + "\n".join(compile_define_line(m) for m in append_mutations) + "\n"
-    text = opts.read_text(encoding="utf-8")
-    if text.count(marker) != 1:
+    text = read_text_preserve_newlines(opts)
+    marker_native = native_newlines(text, marker)
+    block_native = native_newlines(text, block)
+    if text.count(marker_native) != 1:
         raise SystemExit(f"{opts}: expected one MT_APP_CNF_FUNC marker")
-    opts.write_text(text.replace(marker, block, 1), encoding="utf-8")
+    write_text_preserve_newlines(
+        opts, text.replace(marker_native, block_native, 1)
+    )
     for m in append_mutations:
         patch.record(m["id"], opts, compile_define_line(m))
 
@@ -182,10 +205,14 @@ def apply(sdk: Path, examples: Path, manifest_path: Path) -> dict[str, Any]:
     )
     # The remaining two UART edits belong to the same manifest mutation.
     def replace_unrecorded(path: Path, old: str, new: str) -> None:
-        text = path.read_text(encoding="utf-8")
-        if text.count(old) != 1:
-            raise SystemExit(f"{path}: expected exact UART block once")
-        path.write_text(text.replace(old, new, 1), encoding="utf-8")
+        text = read_text_preserve_newlines(path)
+        old_native = native_newlines(text, old)
+        new_native = native_newlines(text, new)
+        if text.count(old_native) != 1:
+            raise SystemExit(f"{path}: expected exact unrecorded block once")
+        write_text_preserve_newlines(
+            path, text.replace(old_native, new_native, 1)
+        )
 
     replace_unrecorded(
         uart_c,
@@ -287,16 +314,20 @@ static void NPITLUART_eventCallBack(UART2_Handle handle, uint32_t event, uint32_
             "#endif",
         ]
     )
-    text = nwk.read_text(encoding="utf-8")
-    if text.count(old_queue) != 1:
+    text = read_text_preserve_newlines(nwk)
+    old_queue_native = native_newlines(text, old_queue)
+    new_queue_native = native_newlines(text, new_queue)
+    if text.count(old_queue_native) != 1:
         raise SystemExit(f"{nwk}: expected pristine NWK queue block once")
-    nwk.write_text(text.replace(old_queue, new_queue, 1), encoding="utf-8")
+    write_text_preserve_newlines(
+        nwk, text.replace(old_queue_native, new_queue_native, 1)
+    )
     for mutation_id in queue_ids:
         patch.record(mutation_id, nwk, "NWK queue value + compile assertion")
 
     # Shared C/ISR stack; preserve 5-page P10 NVS layout.
     linker = sdk / "source/ti/zstack/boards/cc13x4_cc26x4/cc13x4_cc26x4_tirtos7_ticlang.cmd"
-    text = linker.read_text(encoding="utf-8")
+    text = read_text_preserve_newlines(linker)
     for old in (
         "--stack_size=0x600   /* C stack is also used for ISR stack */",
         "--stack_size=1024",
@@ -304,7 +335,7 @@ static void NPITLUART_eventCallBack(UART2_Handle handle, uint32_t event, uint32_
         if text.count(old) != 1:
             raise SystemExit(f"{linker}: expected stack directive once: {old}")
         text = text.replace(old, '--stack_size=4096', 1)
-    linker.write_text(text, encoding="utf-8")
+    write_text_preserve_newlines(linker, text)
     patch.record("headroom.c_isr_stack", linker, "both linker stack directives -> 4096")
 
     # Build ID plus zero-runtime compile contract assertions for every
@@ -321,10 +352,14 @@ static void NPITLUART_eventCallBack(UART2_Handle handle, uint32_t event, uint32_
         + "\n"
     )
     include_marker = '#include "mt_version.h"\n'
-    text = version.read_text(encoding="utf-8")
-    if text.count(include_marker) != 1:
+    text = read_text_preserve_newlines(version)
+    include_marker_native = native_newlines(text, include_marker)
+    contract_native = native_newlines(text, contract)
+    if text.count(include_marker_native) != 1:
         raise SystemExit(f"{version}: mt_version include marker mismatch")
-    text = text.replace(include_marker, include_marker + contract, 1)
+    text = text.replace(
+        include_marker_native, include_marker_native + contract_native, 1
+    )
     old_version = """const uint8_t MTVersionString[] = {
                                    2,  /* Transport protocol revision */
                                    0,  /* Product ID */
@@ -343,9 +378,13 @@ static void NPITLUART_eventCallBack(UART2_Handle handle, uint32_t event, uint32_
                                    ((CODE_REVISION_NUMBER >> 16) & 0xFF),
                                    ((CODE_REVISION_NUMBER >> 24) & 0xFF),
                                  };"""
-    if text.count(old_version) != 1:
+    old_version_native = native_newlines(text, old_version)
+    new_version_native = native_newlines(text, new_version)
+    if text.count(old_version_native) != 1:
         raise SystemExit(f"{version}: pristine MTVersionString mismatch")
-    version.write_text(text.replace(old_version, new_version, 1), encoding="utf-8")
+    write_text_preserve_newlines(
+        version, text.replace(old_version_native, new_version_native, 1)
+    )
     patch.record("build.mt_version_identity", version, "product id + CODE_REVISION_NUMBER bytes")
 
     # The 8.33 project seed is internally inconsistent: compiler says five
