@@ -21,7 +21,7 @@ This file is the canonical repository-level map of coordinator hardware, radio s
   - `docs/P10_*.md`
   - `skills/p10-zstack-restore-recovery/`
 - Active planning branch:
-  - `plan/cc2674p10-ti-znp-control`
+  - `plan/mr4u-p10-ti-znp-control`
 
 Important: `P10` identifies the CC2674P10 radio family, not the MR4U product by itself. Where another CC2674P10 board is possible, use the full coordinator ID.
 
