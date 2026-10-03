@@ -388,7 +388,7 @@ jobs:
           ACTUAL_BUILD=$(grep '^#define T832_BUILD_ID ' build-evidence/effective-macros.txt | awk '{print $3}')
           test -n "$ACTUAL_BUILD" || { echo "::error::T832_BUILD_ID present but value empty"; exit 1; }
           test "$ACTUAL_BUILD" = "$EXPECTED_BUILD" || { echo "::error::T832_BUILD_ID $ACTUAL_BUILD != $EXPECTED_BUILD"; exit 1; }
-          grep -q 'T832_DIAG_R0=1' build-evidence/effective-macros.txt || {
+          grep -q '^#define T832_DIAG_R0 1' build-evidence/effective-macros.txt || {
             echo "::error::T832_DIAG_R0 flag missing from preprocessor probe output"
             exit 1
           }
