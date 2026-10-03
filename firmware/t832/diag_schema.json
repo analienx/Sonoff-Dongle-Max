@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "prefix": "T832D1:",
+  "encoding": "hex of packed little-endian packet",
+  "outer_transport": {
+    "znp_type": "AREQ",
+    "subsystem": "DEBUG",
+    "command": "DEBUG.msg",
+    "max_payload_bytes": 240
+  },
+  "packet": [
+    ["magic", "4 bytes", "T8D1"],
+    ["schema", "u8", 1],
+    ["packet_kind", "u8", "1=record,2=capability"],
+    ["export_sequence", "u16", "monotonic per boot"],
+    ["boot_session", "u16", "firmware-local slot; host collector establishes reboot association from sequence and uptime"],
+    ["uptime_ms", "u64", "extended ClockP hardware time"],
+    ["firmware_revision", "u32", "CODE_REVISION_NUMBER"],
+    ["capability_bitmap", "u32", "supported runtime hooks"],
+    ["critical_overwrite", "u16", "critical recorder overwrite count"],
+    ["routine_overwrite", "u16", "routine recorder overwrite count"],
+    ["export_skipped", "u16", "backpressure/sync/pending skips"],
+    ["record", "20 bytes", "T832DiagRecord"]
+  ],
+  "record": [
+    ["first_ms", "u32", "first occurrence low 32 bits"],
+    ["last_ms", "u32", "last occurrence low 32 bits"],
+    ["sequence", "u16", "record sequence"],
+    ["kind", "u8", "event kind"],
+    ["flags", "u8", "critical/routine flags"],
+    ["a", "u16", "event-specific"],
+    ["b", "u16", "event-specific"],
+    ["c", "u16", "event-specific"],
+    ["repeat_count", "u16", "coalesced repeat count"]
+  ],
+  "event_kinds": {
+    "1": "BOOT",
+    "2": "MT_COMMAND_RX",
+    "3": "MT_COMMAND_DISPATCH",
+    "4": "MT_COMMAND_COMPLETE",
+    "5": "RESPONSE_QUEUED",
+    "6": "RESPONSE_ALLOC_FAIL",
+    "7": "NPI_RX_PROGRESS",
+    "8": "NPI_RX_OVERFLOW",
+    "9": "NPI_WRITE_REJECT",
+    "10": "NPI_TX_FINISHED",
+    "11": "TASK_SCHEDULE",
+    "12": "TASK_WORK",
+    "13": "STARTUP_FROM_APP_ENTRY",
+    "14": "STARTUP_BDB_REQUEST",
+    "15": "STARTUP_BDB_RETURN",
+    "16": "STARTUP_SRSP_QUEUE",
+    "17": "BDB_DISPATCH",
+    "18": "BDB_RETURN",
+    "19": "HEALTH",
+    "20": "RESOURCE",
+    "21": "EXPORT_SKIP",
+    "22": "FIRST_FAULT",
+    "23": "RX_BUFFER_FULL",
+    "24": "NETWORK_STATE",
+    "25": "TRANSPORT_CONFIG"
+  },
+  "event_semantics": {
+    "BOOT": "a=early reset cause, b=MT task id, c=low 16 capability bits",
+    "HEALTH": "a=MT scheduling count in prior 10 s (saturated), b=MT actual-work age ms, c=NPI actual-work age ms",
+    "RESOURCE:a=1": "b=RX high-water bytes, c=max approximate normal NPI queue depth",
+    "RESOURCE:a=2": "b=max observed TX-active age ms, c=Zigbee-stack work age ms",
+    "NETWORK_STATE": "a=bdbNodeIsOnANetwork, b=_NIB.nwkState",
+    "TRANSPORT_CONFIG": "a=baud/100, b=NPI flow-control setting"
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "variant": "T832-DIAG-R0",
+  "base_variant": "T832-KCTRL-R0",
+  "purpose": "Issue #73 failure-mechanism discriminator; observes without changing recovery/failure semantics",
+  "static_ram": {
+    "maximum_diagnostic_bytes": 4096,
+    "minimum_linker_free_sram_bytes": 8192,
+    "critical_records": 64,
+    "routine_records": 64
+  },
+  "transport": {
+    "envelope": "AREQ DEBUG.msg",
+    "text_prefix": "T832D1:",
+    "schema": 1,
+    "maximum_payload_bytes": 240,
+    "minimum_export_interval_ms": 5000,
+    "health_snapshot_interval_ms": 10000,
+    "resource_snapshot_interval_ms": 60000,
+    "maximum_pending_diagnostic_messages": 1,
+    "normal_znp_has_priority": true,
+    "bypass_sync_suppression": false
+  },
+  "capabilities": {
+    "startup_from_app_stages": true,
+    "bdb_dispatch_stages": true,
+    "mt_task_schedule_and_work": true,
+    "npi_transport_progress": true,
+    "uart_rx_overflow": true,
+    "uart_tx_finished": true,
+    "command_stage_tracking": true,
+    "sync_request_suppression_observation": true,
+    "rx_high_water": true,
+    "approximate_npi_queue_depth": true,
+    "reset_cause_before_clear": true,
+    "existing_network_resume_state": true,
+    "aggregated_progress_counters": true,
+    "transport_resource_maxima": true,
+    "task_modes": false,
+    "heap_free_min_largest": false,
+    "global_allocation_failure_sites": false,
+    "stack_watermarks": false,
+    "af_outstanding_age": false,
+    "nv_compaction_phase": false,
+    "fault_pc_lr_sp_registers": false
+  },
+  "release_gate_required_capabilities": [
+    "startup_from_app_stages",
+    "bdb_dispatch_stages",
+    "mt_task_schedule_and_work",
+    "npi_transport_progress",
+    "uart_rx_overflow",
+    "uart_tx_finished",
+    "command_stage_tracking",
+    "sync_request_suppression_observation",
+    "reset_cause_before_clear",
+    "existing_network_resume_state",
+    "aggregated_progress_counters"
+  ],
+  "unsupported_policy": "Unsupported observations are exported/decoded as unavailable; absence is never interpreted as CPU failure.",
+  "firmware_identity": {
+    "wire_identity": "MT version + T832-DIAG-R0 build fingerprint",
+    "full_sha256": "associated by host collector from the deployed artifact manifest; the image cannot contain its own final SHA256 without a post-link identity convention"
+  }
+}

@@ -1,0 +1,41 @@
+# T832 capture-before-recovery barrier (candidate automation skeleton)
+# Not deployed by this executor. The capture step must precede any Z2M stop or
+# modem-control-line action. The persistent per-incident latch in
+# /config/.private/t832-diag/state/incident-latch.json is the idempotency guard;
+# automation mode single alone is not a substitute for it.
+automation:
+  - alias: "T832 capture before P10 USB RTS recovery"
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.zigbee2mqtt_bridge_online
+        to: "off"
+        for:
+          minutes: 3
+    action:
+      - service: shell_command.t832_capture
+        data:
+          trigger: "bridge-online-loss"
+      - service: shell_command.t832_authorize_reset
+      - service: hassio.addon_stop
+        data:
+          addon: 45df7312_zigbee2mqtt
+      - service: shell_command.t832_rts_r2_pulse
+      - service: shell_command.t832_mark_recovering
+      # Operator/verification steps follow: log reset, boot/startup, and
+      # existing post-recovery ZDO verification, then recovery-result and
+      # delayed close-if-stable. Failed verification stays latched (no retry).
+      # If capture fails or evidence cannot be saved, stop here: inhibit reset
+      # and surface the local operator alert. Do not notify from the executor.
+shell_command:
+  t832_capture: >-
+    python3 /config/t832-diag/t832_incident.py --root /config/.private/t832-diag
+    capture --trigger '{{ trigger }}' --window-seconds 900 --deadline-seconds 30
+  t832_authorize_reset: >-
+    python3 /config/t832-diag/t832_incident.py --root /config/.private/t832-diag
+    authorize-reset
+  t832_rts_r2_pulse: >-
+    echo 'existing-validated-R2-primitive: DTR/RTS deassert, 100ms, RTS 150ms, deassert, 1.5s, Z2M stopped'
+  t832_mark_recovering: >-
+    python3 /config/t832-diag/t832_incident.py --root /config/.private/t832-diag
+    mark-recovering
