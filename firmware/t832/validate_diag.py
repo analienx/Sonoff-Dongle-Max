@@ -108,9 +108,10 @@ def main() -> int:
     require("stability-window-not-complete" in host, "10-minute stability close guard missing")
 
     harness = (root / "host_harness" / "t832_diag_host_test.c").read_text(encoding="utf-8")
+    harness_sdk = (root / "host_harness" / "t832_host_sdk.h").read_text(encoding="utf-8")
     require("T832-DIAG-R0 host harness marker" in harness, "host harness marker missing")
     require('#include "t832_diag_impl.inc"' in harness, "harness must exercise the real recorder")
-    require("MT_BuildAndSendZToolResponse" in harness, "harness export stub missing")
+    require("MT_BuildAndSendZToolResponse" in harness_sdk, "harness export stub missing")
 
     print("T832-DIAG-R0 policy contract: PASS")
     return 0
