@@ -38,6 +38,8 @@ CPU/hook cost (worst-case bounds, MT task or ISR context as noted):
   records; hex conversion only on the export path, never in hooks.
 - Heap sampling: `Memory_getStats` only in the 60 s RESOURCE tick (MT task
   context), one call per tick; unavailable reported as `0xFFFF/0xFFFF`.
+  One resource slot rides each export while the 10 s health triple is due,
+  so the heap slot recurs about every 13 min, not every 60 s.
 - No allocation, formatting, UART, flash, or waits exist in any hook or
   fault path; the validator greps every hot hook body for them.
 

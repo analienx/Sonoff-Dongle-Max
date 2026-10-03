@@ -286,9 +286,15 @@ class CollectorTests(unittest.TestCase):
             root = Path(td)
             store = incident.Store(root / "private")
             log = root / "z2m.log"
+            # Two lines: the first fits the 10-byte budget check at loop top
+            # and is collected; the second trips the budget, so the remainder
+            # is honestly reported as partial. A single fully-collected line
+            # is complete, not partial, even when it exceeds the budget.
             log.write_text(
                 "2026-10-03T09:00:00Z zh:zstack:znp "
-                f"T832D1:{packet_hex(export_sequence=1, uptime_ms=1000)}\n",
+                f"T832D1:{packet_hex(export_sequence=1, uptime_ms=1000)}\n"
+                "2026-10-03T09:00:01Z zh:zstack:znp "
+                f"T832D1:{packet_hex(export_sequence=2, uptime_ms=2000)}\n",
                 encoding="utf-8",
             )
             result = incident.collect(
@@ -297,6 +303,10 @@ class CollectorTests(unittest.TestCase):
                 max_collect_bytes=10,
             )
             self.assertTrue(result["partial"])
+            self.assertEqual(result["diag_records"], 1)
+            self.assertTrue(
+                any(n.startswith("collect-budget-exceeded:") for n in result["notes"])
+            )
 
 
 def stream_rows(store: Store) -> list[dict]:

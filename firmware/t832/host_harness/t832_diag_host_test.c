@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "t832_host_sdk.h"
+#include "xdc/runtime/Memory.h"
 
 #define CODE_REVISION_NUMBER 8320001u
 #define T832_BUILD_ID 0xA5A50001u
@@ -56,8 +57,6 @@ void HostHeap_getStats(Memory_Stats *stats)
   stats->totalFreeSize = host_heap_free;
   stats->largestFreeSize = host_heap_largest;
 }
-const xdc_runtime_IHeap_Handle Memory_defaultHeapInstance = 0;
-
 #define HOST_MAX_FRAMES 8192u
 static uint8_t host_frame_type[HOST_MAX_FRAMES];
 static uint8_t host_frame_id[HOST_MAX_FRAMES];
@@ -81,6 +80,9 @@ void HostMdi_capture(uint8_t cmdType, uint8_t cmdId, uint8_t len,
 }
 
 #include "t832_diag_impl.inc"
+
+/* Defined after the .inc so xdc_runtime_IHeap_Handle is a complete type. */
+const xdc_runtime_IHeap_Handle Memory_defaultHeapInstance = 0;
 
 void MT_BuildAndSendZToolResponse(uint8_t cmdType, uint8_t cmdId,
                                   uint8_t dataLen, uint8_t *dataPtr)
@@ -213,13 +215,13 @@ static int decode_frame(uint32_t i, DecFrame *out)
     out->schema = bin[4];
     if (out->schema != 2u) return -1;
     out->export_seq = (uint16_t)(bin[6] | ((uint16_t)bin[7] << 8));
-    out->build_id = (uint32_t)bin[14] | ((uint32_t)bin[15] << 8) |
-                    ((uint32_t)bin[16] << 16) | ((uint32_t)bin[17] << 24);
-    out->caps = (uint32_t)bin[18] | ((uint32_t)bin[19] << 8) |
-                ((uint32_t)bin[20] << 16) | ((uint32_t)bin[21] << 24);
-    out->crit_over = (uint16_t)(bin[22] | ((uint16_t)bin[23] << 8));
-    out->rout_over = (uint16_t)(bin[24] | ((uint16_t)bin[25] << 8));
-    out->skipped = (uint16_t)(bin[26] | ((uint16_t)bin[27] << 8));
+    out->build_id = (uint32_t)bin[18] | ((uint32_t)bin[19] << 8) |
+                    ((uint32_t)bin[20] << 16) | ((uint32_t)bin[21] << 24);
+    out->caps = (uint32_t)bin[22] | ((uint32_t)bin[23] << 8) |
+                ((uint32_t)bin[24] << 16) | ((uint32_t)bin[25] << 24);
+    out->crit_over = (uint16_t)(bin[26] | ((uint16_t)bin[27] << 8));
+    out->rout_over = (uint16_t)(bin[28] | ((uint16_t)bin[29] << 8));
+    out->skipped = (uint16_t)(bin[30] | ((uint16_t)bin[31] << 8));
     n = bin[32];
     if (n > 4u) return -1;
     if (binLen != (uint8_t)(33u + 20u * n)) return -1;
@@ -563,6 +565,12 @@ static void test_af_accept_confirm(void)
   CHECK(r.a == 1u);
 }
 
+static const uint8_t *req_trunc(void)
+{
+  static const uint8_t t[5] = {2, 0x24, 0x01, 0x34, 0x12};
+  return t;
+}
+
 static void test_af_variants_overflow(void)
 {
   /* EXT 0x02: ep[9+3], srcEp[12+3], trans[15+3] relative to frame head. */
@@ -589,9 +597,11 @@ static void test_af_variants_overflow(void)
     CHECK(t832Diag.af_outstanding == 0u);
     wire_dequeue_finish(0xFEu, 0x44u, 0x80u, 3u);
   }
+  /* Nonzero SRSP status is a rejection: no table entry, reject counted. */
   T832Diag_afDispatch(0x24u, 0x03u, src, 13u);
   T832Diag_responseQueued(0x64u, 0x03u, 1u, srsp_bad);
-  CHECK(t832Diag.af_outstanding == 1u);
+  CHECK(t832Diag.af_outstanding == 0u);
+  CHECK(t832Diag.af_rejected_n == 1u);
   wire_dequeue_finish(0xFEu, 0x64u, 0x03u, 1u);
   /* Fill the table with unconfirmed AREQ requests, then overflow it. */
   for (k = 0; k < 8u; k++) {
@@ -611,16 +621,14 @@ static void test_af_variants_overflow(void)
   /* Truncated payloads are anomalies, not parses. */
   T832Diag_afDispatch(0x24u, 0x01u, req_trunc(), 5u);
   drain_all();
+  CHECK(find_kind(T832_DIAG_EV_AF_REJECT, &r));
+  CHECK(r.a == 6u);
+  CHECK(r.b == 0x55u);
+  CHECK(r.c == 5u);
   CHECK(find_kind(T832_DIAG_EV_AF_ANOMALY, &r));
   CHECK(t832Diag.af_outstanding_max == 8u);
   CHECK(find_kind(28u, &r));
   CHECK(r.c == 8u);
-}
-
-static const uint8_t *req_trunc(void)
-{
-  static const uint8_t t[5] = {2, 0x24, 0x01, 0x34, 0x12};
-  return t;
 }
 
 static void test_nv_events(void)
@@ -732,7 +740,9 @@ static void test_heap_resource(void)
   int ticks;
   fresh(9u);
   emit_one();
-  for (ticks = 0; ticks < 5; ticks++) {
+  /* One resource slot per export while the 10 s health triple is due, so a
+   * full 13-slot rotation needs 13 exports; run 14 for margin. */
+  for (ticks = 0; ticks < 14; ticks++) {
     advance_ms(60000u);
     T832Diag_exportPoll();
     wire_complete_diag(host_frame_count - 1u);

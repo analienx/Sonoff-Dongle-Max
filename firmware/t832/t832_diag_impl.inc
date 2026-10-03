@@ -766,37 +766,36 @@ void T832Diag_nvInit(uint8_t action)
   }
 }
 
-/* Peek the oldest unexported record: returns 1=critical, 2=routine, 0=empty.
- * The caller retires each peeked slot with T832Diag_popPeeked(ring) using the
- * returned selector, so an ISR record added between peek and retire cannot
- * misdirect the retirement to the wrong ring. */
-static uint8_t T832Diag_peek(T832DiagRecord *out)
+/* Peek the oldest unstaged record: returns 1=critical, 2=routine, 0=empty.
+ * skip_crit/skip_rout count records already staged from each ring during this
+ * export, so successive peeks walk forward instead of returning the same
+ * oldest record twice. Retirement stays deferred (T832Diag_popPeeked per
+ * staged selector) so a refused MT build keeps the records queued; an ISR
+ * record added between peek and retire only appends newer entries, which the
+ * FIFO-order pops never touch. */
+static uint8_t T832Diag_peekAt(uint8_t skip_crit, uint8_t skip_rout,
+                               T832DiagRecord *out)
 {
   uint32_t key = OsalPort_enterCS();
-  T832DiagRecord *ring = 0;
-  uint16_t cap = 0;
-  uint16_t *count = 0;
-  uint16_t *head = 0;
   uint8_t sel = 0u;
 
-  if (t832Diag.critical_count) {
-    ring = t832Diag.critical; cap = T832_DIAG_CRITICAL_RECORDS;
-    count = &t832Diag.critical_count; head = &t832Diag.critical_head;
+  if (t832Diag.critical_count > skip_crit) {
+    uint16_t tail = (uint16_t)((t832Diag.critical_head +
+                                T832_DIAG_CRITICAL_RECORDS -
+                                t832Diag.critical_count + skip_crit) %
+                               T832_DIAG_CRITICAL_RECORDS);
+    *out = t832Diag.critical[tail];
     sel = 1u;
-  } else if (t832Diag.routine_count) {
-    ring = t832Diag.routine; cap = T832_DIAG_ROUTINE_RECORDS;
-    count = &t832Diag.routine_count; head = &t832Diag.routine_head;
+  } else if (t832Diag.routine_count > skip_rout) {
+    uint16_t tail = (uint16_t)((t832Diag.routine_head +
+                                T832_DIAG_ROUTINE_RECORDS -
+                                t832Diag.routine_count + skip_rout) %
+                               T832_DIAG_ROUTINE_RECORDS);
+    *out = t832Diag.routine[tail];
     sel = 2u;
-  } else {
-    OsalPort_leaveCS(key);
-    return 0u;
   }
-  {
-    uint16_t tail = (uint16_t)((*head + cap - *count) % cap);
-    *out = ring[tail];
-    OsalPort_leaveCS(key);
-    return sel;
-  }
+  OsalPort_leaveCS(key);
+  return sel;
 }
 
 static void T832Diag_popPeeked(uint8_t sel)
@@ -1051,7 +1050,15 @@ void T832Diag_exportPoll(void)
   }
 
   while (nbatch < T832_DIAG_BATCH_MAX) {
-    uint8_t sel = T832Diag_peek(&batch[nbatch]);
+    uint8_t sel;
+    uint8_t i2;
+    uint8_t skip_crit = 0u;
+    uint8_t skip_rout = 0u;
+    for (i2 = 0u; i2 < nbatch; i2++) {
+      if (staged[i2] == 1u) skip_crit++;
+      else if (staged[i2] == 2u) skip_rout++;
+    }
+    sel = T832Diag_peekAt(skip_crit, skip_rout, &batch[nbatch]);
     if (!sel) break;
     staged[nbatch] = sel;
     nbatch++;

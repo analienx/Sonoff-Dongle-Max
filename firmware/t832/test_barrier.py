@@ -15,8 +15,6 @@ import importlib.util
 import json
 import os
 import re
-import shlex
-import stat
 import subprocess
 import sys
 import tempfile
@@ -73,10 +71,12 @@ class BarrierStructureTests(unittest.TestCase):
 
     def test_modes_and_no_notifications(self) -> None:
         text = BARRIER.read_text(encoding="utf-8")
-        self.assertNotIn("continue_on_error", text)
         self.assertNotIn("notify.", text)
         for automation in self.automations:
             self.assertEqual(automation.get("mode"), "single")
+            # Prose may discuss the pattern; only real action keys matter.
+            for step in flatten_actions(automation["actions"]):
+                self.assertNotIn("continue_on_error", step)
 
     def test_production_triggers_reused(self) -> None:
         ids = {t.get("id") for t in self.barrier["triggers"]}
@@ -140,33 +140,58 @@ class BarrierChainTests(unittest.TestCase):
         self.env = dict(os.environ)
         self.env["PATH"] = str(self.bin) + os.pathsep + self.env.get("PATH", "")
         self.env["T832_INCIDENT_ROOT"] = str(self.state)
-        self.write_curl_shim()
+        self.ha_log = self.root / "home-assistant.log"
+        self.ha_log.write_text("", encoding="utf-8")
+        self.write_supervisor_shim()
         self.write_rts_shim(0)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def write_curl_shim(self, states: list[str] | None = None) -> None:
+    def write_supervisor_shim(self, states: list[str] | None = None) -> None:
+        """Queue supervisor add-on states; each query consumes the head.
+
+        A tiny Python reader stands in for `curl ... http://supervisor/...` so
+        the chain tests run without a shell or network. It emits the exact
+        supervisor JSON envelope, so the template's `| python3 -c` parsing
+        stage is still exercised verbatim.
+        """
         self.addon_states.write_text("\n".join(states or ["stopped"]) + "\n", encoding="utf-8")
-        shim = self.bin / "curl"
-        shim.write_text(
-            "#!/bin/bash\n"
-            f'head -n 1 "{self.addon_states}"\n'
-            f'tail -n +2 "{self.addon_states}" > "{self.addon_states}.next"\n'
-            f'mv "{self.addon_states}.next" "{self.addon_states}"\n',
-            encoding="utf-8",
-        )
-        shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
+        reader = self.bin / "supervisor_state.py"
+        if not reader.exists():
+            reader.write_text(
+                "import json\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "path = Path(sys.argv[1])\n"
+                "lines = path.read_text(encoding='utf-8').splitlines()\n"
+                "first = lines[0] if lines else 'unknown'\n"
+                "rest = lines[1:]\n"
+                "path.write_text('\\n'.join(rest) + ('\\n' if rest else ''), encoding='utf-8')\n"
+                "print(json.dumps({'data': {'state': first}}))\n",
+                encoding="utf-8",
+            )
 
     def write_rts_shim(self, returncode: int) -> None:
-        shim = self.bin / "mr4u_p10_rts_reset"
+        shim = self.bin / "mr4u_p10_rts_reset.py"
         shim.write_text(
-            "#!/bin/bash\n"
-            f'echo "rts-invoked" >> "{self.marker_log}"\n'
-            f"exit {returncode}\n",
+            "import sys\n"
+            "from pathlib import Path\n"
+            f"returncode = {int(returncode)}\n"
+            f"marker = {str(self.marker_log)!r}\n"
+            "with open(marker, 'a', encoding='utf-8') as fh:\n"
+            "    fh.write('rts-invoked\\n')\n"
+            "raise SystemExit(returncode)\n",
             encoding="utf-8",
         )
-        shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
+
+    def run_rts_shim(self) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(self.bin / "mr4u_p10_rts_reset.py")],
+            capture_output=True,
+            text=True,
+            env=self.env,
+        )
 
     def mark(self, name: str) -> None:
         with self.marker_log.open("a", encoding="utf-8") as fh:
@@ -185,8 +210,21 @@ class BarrierChainTests(unittest.TestCase):
             env=self.env,
         )
 
+    def rewrite_deploy_paths(self, rendered: str) -> str:
+        """Map deploy-time paths to this test's sandbox (no shell needed)."""
+        rendered = rendered.replace(
+            "/config/python_scripts/t832_incident.py", str(HERE / "t832_incident.py")
+        )
+        rendered = rendered.replace("--root /config/.private/t832-diag", "--root " + str(self.state))
+        rendered = rendered.replace("--source /config/zigbee2mqtt/log", "--source " + str(self.log))
+        rendered = rendered.replace(
+            "--source /config/home-assistant.log", "--source " + str(self.ha_log)
+        )
+        return rendered
+
     def run_shell_template(self, name: str, values: dict | None = None) -> subprocess.CompletedProcess:
         rendered = render(self.commands[name], values or {})
+        rendered = self.rewrite_deploy_paths(rendered)
         rendered = rendered.replace("python3 ", sys.executable + " ", 1)
         rendered = rendered.replace(" | python3 ", " | " + sys.executable + " ")
         return subprocess.run(
@@ -203,6 +241,13 @@ class BarrierChainTests(unittest.TestCase):
 
     def addon_state(self) -> str:
         rendered = render(self.commands["t832_addon_state"], {})
+        head, sep, tail = rendered.partition(" | ")
+        self.assertTrue(sep, "addon_state template lost its parse stage")
+        reader = (
+            f'"{sys.executable}" "{self.bin / "supervisor_state.py"}" "{self.addon_states}"'
+        )
+        rendered = reader + " | " + tail
+        rendered = rendered.replace("python3 ", sys.executable + " ", 1)
         rendered = rendered.replace(" | python3 ", " | " + sys.executable + " ")
         proc = subprocess.run(rendered, shell=True, capture_output=True, text=True, env=self.env)
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -227,16 +272,16 @@ class BarrierChainTests(unittest.TestCase):
         mark = self.run_shell_template("t832_mark_recovering")
         self.assertEqual(mark.returncode, 0, mark.stderr)
 
-        self.write_curl_shim(["starting", "stopped"])
+        # Supervisor state persists across polls; the queue models the
+        # transition, then the settled value.
+        self.write_supervisor_shim(["starting", "stopped", "stopped"])
         self.mark("addon-stop")
         for _ in range(6):
             if self.addon_state() == "stopped":
                 break
         self.assertEqual(self.addon_state(), "stopped")
 
-        rts = subprocess.run(
-            [str(self.bin / "mr4u_p10_rts_reset")], capture_output=True, env=self.env
-        )
+        rts = self.run_rts_shim()
         self.assertEqual(rts.returncode, 0)
         self.mark("addon-start")
 
@@ -283,7 +328,7 @@ class BarrierChainTests(unittest.TestCase):
         self.run_shell_template("t832_capture", {"trigger": "mesh_outage"})
         self.run_shell_template("t832_authorize_reset")
         self.run_shell_template("t832_mark_recovering")
-        self.write_curl_shim(["started"] * 8)
+        self.write_supervisor_shim(["started"] * 8)
         confirmed = False
         for _ in range(6):
             if self.addon_state() == "stopped":
@@ -300,10 +345,10 @@ class BarrierChainTests(unittest.TestCase):
         self.run_shell_template("t832_capture", {"trigger": "mesh_outage"})
         self.run_shell_template("t832_authorize_reset")
         self.run_shell_template("t832_mark_recovering")
-        self.write_curl_shim(["stopped"])
+        self.write_supervisor_shim(["stopped"])
         self.assertEqual(self.addon_state(), "stopped")
         self.write_rts_shim(3)
-        rts = subprocess.run([str(self.bin / "mr4u_p10_rts_reset")], capture_output=True, env=self.env)
+        rts = self.run_rts_shim()
         self.assertEqual(rts.returncode, 3)
         self.assertEqual(self.latch_status(), "recovering")
         self.assertNotIn("addon-start", self.markers())

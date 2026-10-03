@@ -20,7 +20,29 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
-import fcntl
+
+try:
+    import fcntl
+
+    def _lock_exclusive(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+    def _lock_release(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+except ImportError:  # Windows: no fcntl; msvcrt locking is the OS primitive.
+    import msvcrt
+
+    def _lock_exclusive(fd: int) -> None:
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\x00")
+        # Lock a fixed region: the fill above leaves the offset at 1, which
+        # would lock a disjoint byte and silently disable exclusion.
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+
+    def _lock_release(fd: int) -> None:
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 import hashlib
 import json
 import os
@@ -175,7 +197,7 @@ class Store:
                 pass
             fd = os.open(self.lock_path, os.O_RDWR)
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                _lock_exclusive(fd)
             except Exception:
                 os.close(fd)
                 raise
@@ -187,7 +209,7 @@ class Store:
             self._lock_depth -= 1
             if self._lock_depth == 0 and self._lock_fd is not None:
                 try:
-                    fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+                    _lock_release(self._lock_fd)
                 finally:
                     os.close(self._lock_fd)
                     self._lock_fd = None
@@ -877,7 +899,7 @@ def capture(
         missing = cursor.get("missing_sources", []) if isinstance(cursor, dict) else []
 
         incident_id = utcnow().strftime("%Y%m%dT%H%M%S.%fZ")
-        tmp = store.incidents / f".{incident_id}.{os.getpid()}.tmp"
+        tmp = store.tmp_unique(store.incidents / f".{incident_id}", ".tmp")
         final = store.incidents / incident_id
         tmp.mkdir(parents=False, exist_ok=False)
         try:

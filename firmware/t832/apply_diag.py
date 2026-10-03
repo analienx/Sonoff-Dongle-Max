@@ -85,7 +85,7 @@ def apply_diag(sdk: Path, examples: Path, control_manifest: Path) -> dict[str, A
 
     # R06: capture the reset source at the top of main(), the first proven
     # executed application path. Boot.c/Boot.o is not linked into the ZNP
-    # image (absent from map and symbols), so the previous Boot_getBootReason
+    # image (absent from map and symbols), so the previous Boot-driver
     # writer was dead code. SysCtrlResetSourceGet is a pure register read and
     # nothing in the image clears the source, so main() entry is the earliest
     # safe capture point. Validity is marked with T832_DIAG_BOOT_MAGIC and
@@ -403,6 +403,11 @@ def apply_diag(sdk: Path, examples: Path, control_manifest: Path) -> dict[str, A
         "        T832Diag_npiTaskWake();\n",
         "diag.npi_task.wake",
     )
+    # App-originated TX enters the ownership FIFO here: this site is inside
+    # NPITask_sendToHost (npi_task.c), where the NPI task packages a message
+    # handed up from the application and queues it for the UART. The anchor
+    # is unique to that function (the other recPtr->npiMsg store uses
+    # `if(pNPIMsg != NULL)` without spaces and without the recPtr check).
     ex.replace(
         ntask,
         "    if ( pNPIMsg != NULL && recPtr != NULL )\n"
