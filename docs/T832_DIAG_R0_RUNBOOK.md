@@ -4,10 +4,25 @@ This repository authors the integration but never executes it on hardware and ne
 
 ## 1. Preconditions
 
-- Diagnostic firmware T832-DIAG-R0 running; host file logging captures `zh:zstack:znp` DEBUG.msg lines with `T832D1:` payloads.
-- Private store root, e.g. `/config/.private/t832-diag` (0700; JSONL 0600). Firmware SHA recorded via `t832_incident.py` firmware binding.
-- Watchdog trigger defined as sustained loss of expected application traffic / bridge `online` false, not telemetry absence alone. Missing telemetry is loss of observability, never proof of CPU failure.
-- Current HA automation mode `single` is not a substitute for the persisted per-incident latch in `state/incident-latch.json`.
+- Diagnostic firmware T832-DIAG-R0 running; host file logging captures the
+  herdsman `zh:zstack:znp` debug namespace. DEBUG.msg lines arrive in the
+  stock serialization `AREQ: DEBUG - msg -
+  {"length":N,"string":{"type":"Buffer","data":[...]}}` (decoded as
+  `herdsman-buffer-v1`); a documented plaintext `T832D1:`/`T832D2:` line is
+  accepted only as the versioned `text-fallback-v1` fallback. Configure the
+  Z2M file log (path, rotation, UTC timestamps, debug level) per site; this
+  candidate only reads it.
+- Private store root, e.g. `/config/.private/t832-diag` (0700; JSONL 0600).
+  Bind the deployed artifact before capturing:
+  `t832_incident.py bind-firmware --artifact <T832-DIAG-R0.hex>`.
+- Watchdog trigger defined as sustained loss of expected application traffic /
+  bridge `online` false, not telemetry absence alone. Missing telemetry is
+  loss of observability, never proof of CPU failure. Log timestamps must carry
+  an explicit timezone (UTC); naive timestamps are rejected, never assumed.
+- Current HA automation mode `single` is not a substitute for the persisted
+  per-incident latch in `state/incident-latch.json`. All mutating commands
+  hold an OS-exclusive lock; concurrent invocations serialize, they never
+  interleave state.
 
 ## 2. Capture barrier (must precede any Z2M stop or control-line touch)
 
@@ -16,47 +31,96 @@ python3 firmware/t832/t832_incident.py \
   --root /config/.private/t832-diag \
   --config-fingerprint "$T832_CONFIG_FINGERPRINT" \
   capture --trigger "$TRIGGER_REASON" \
-  --window-seconds 900 --deadline-seconds 30
+  --window-seconds 900 --deadline-seconds 30 \
+  --require-firmware-binding
 ```
 
-Expected: `status:captured` with `bundle` path containing `manifest.json`, `SHA256.json`, `diag-15m.jsonl`, `host-events-15m.jsonl`. `manifest.json` records trigger, 15-minute window, latest diagnostic state, last successful command stages (`MT_COMMAND_RX/DISPATCH/COMPLETE`, `RESPONSE_QUEUED`, `NPI_TX_FINISHED`, startup stages, BDB dispatch/return), missing sources, firmware SHA, and the observability note. Partial/missing sources are explicit. The bundle directory is committed atomically; the latch moves to `captured` with `reset_used:false`.
+Expected: `status:captured` with `bundle` path containing `manifest.json`,
+`SHA256.json`, `diag-15m.jsonl`, `host-events-15m.jsonl`. `manifest.json`
+records trigger, 15-minute source-time window, latest diagnostic state, last
+successful command stages within the latest boot group (record chronology,
+not file arrival order), unknown-time counts, window truncation, collect
+partiality, missing sources, firmware SHA, and the observability note. The
+bundle directory is committed atomically; the latch moves to `captured` with
+`reset_used:false`.
 
-If capture exceeds 30 s, fails, or evidence cannot be saved: inhibit automatic reset, surface a local operator alert per site contract, and stop. Do not send notifications from this executor. Do not proceed to control-line actions.
+If capture exceeds the deadline, fails, or evidence cannot be saved: inhibit
+automatic reset, surface a local operator alert per site contract, and stop.
+Do not send notifications from this executor. Do not proceed to control-line
+actions. A deadline failure never authorizes a later reset by itself.
 
 ## 3. Exactly one validated USB RTS R2 recovery (only after `captured`)
 
 ```sh
 python3 firmware/t832/t832_incident.py --root /config/.private/t832-diag authorize-reset
-# Stop Zigbee2MQTT and ensure exclusive serial ownership of the P10 CDC endpoint.
-# DTR/RTS deassert; wait 100 ms; RTS assert 150 ms; deassert; wait 1.5 s.
-# Keep DTR deasserted (normal boot, no BSL). No erase/flash/restore.
+# Stop Zigbee2MQTT, confirm stopped via the supervisor add-on state (bounded
+# polls), then run ONLY the existing validated helper
+# shell_command.mr4u_p10_rts_reset (DTR/RTS deassert; 100 ms; RTS assert
+# 150 ms; deassert; 1.5 s; keep DTR deasserted; no erase/flash/restore).
 python3 firmware/t832/t832_incident.py --root /config/.private/t832-diag mark-recovering
 ```
 
-`authorize-reset` succeeds once: latch `captured` → `reset_authorized` with `reset_used:true`. A second call fails `automatic-reset-already-consumed`. Failed-recovery latch states also refuse new resets. Log the reset action, subsequent boot/startup records, and existing post-recovery ZDO verification. Do not add periodic ZDO workload. SYS responsiveness alone is not recovery.
+`authorize-reset` first re-verifies every committed bundle hash, then succeeds
+once: latch `captured` → `reset_authorized` with `reset_used:true`. A second
+call fails `automatic-reset-already-consumed`; tampered or missing bundles
+fail `reset-permit-hash-mismatch` / `reset-permit-bundle-missing` and preserve
+the `captured` latch. Failed-recovery latch states also refuse new resets.
+Log the reset action, subsequent boot/startup records, and existing
+post-recovery ZDO verification. Do not add periodic ZDO workload. SYS
+responsiveness alone is not recovery.
 
-## 4. Verification and latch close
+## 4. Verification, stability observation, and latch close
 
-Report recovery with observed traffic state:
+Report recovery with observed traffic state (ZDO proof required):
 
 ```sh
 python3 firmware/t832/t832_incident.py --root /config/.private/t832-diag \
-  recovery-result --success true|false --normal-traffic true|false
+  recovery-result --success true|false --normal-traffic true|false --zdo-ok true|false
 ```
 
-`success=false` or `normal_traffic=false` moves the latch to `failed` and prohibits automatic retry. Success moves to `stabilizing` with `stable_after_utc` = now + 10 minutes and requires `normal_traffic_observed:true`. Close only after 10 minutes of stable bridge plus observed normal traffic with bridge up:
+`success=false`, `normal_traffic=false`, or `zdo_ok=false` moves the latch to
+`failed` and prohibits automatic retry. Success moves to `stabilizing` with a
+10-minute window and requires BOTH normal traffic and a bounded ZDO check.
+During the window, record observations (every 5 minutes via the close
+automation):
 
 ```sh
+python3 firmware/t832/t832_incident.py --root /config/.private/t832-diag \
+  stability-observation --bridge-up true|false --normal-traffic true|false --zdo-ok true|false
 python3 firmware/t832/t832_incident.py --root /config/.private/t832-diag \
   close-if-stable --bridge-up true --normal-traffic true
 ```
 
-Early close fails `stability-window-not-complete`. Partial SYS-only recovery and failed ZDO verification remain `failed`, never `closed`. `manual-clear --reason` is operator-only and audited in `host-events.log`.
+Close requires: window elapsed, full observation coverage (no gap over 180 s),
+every observation bridge-up, traffic+ZDO evidence in both halves, no clock
+anomaly or restart. Mid-window outage, coverage gaps, restarts, stale traffic,
+or missing ZDO move the latch to `failed`, never `closed`. Early close fails
+`stability-window-not-complete`. `manual-clear --reason` is operator-only,
+audited in `host-events.log`, and refuses corrupt state without `--force`.
 
-## 5. HA automation template wiring
+## 5. HA automation wiring
 
-`deploy/t832_capture_barrier.yaml` is a candidate automation skeleton: trigger on the bridge-online loss condition, action order strictly `capture` → `authorize-reset` → stop Z2M → RTS pulse (existing validated R2 primitive) → `mark-recovering` → verify → `recovery-result` → delayed `close-if-stable`. The automation must run `mode: single` per-step with the persistent latch as the idempotency guard, not as its replacement. Reviewers must confirm the capture step cannot be skipped and that control-line actions are unreachable unless `capture` returned `ok:true`.
+`deploy/t832_capture_barrier.yaml` (with `deploy/t832_shell_commands.yaml`) is
+the candidate automation: it reuses the three production outage triggers and
+runs `capture` → `authorize-reset` → `mark-recovering` → stop Z2M →
+stop-confirm (bounded supervisor polls) → existing RTS helper →
+start → bridge wait → bounded ZDO `permit_join` check → `recovery-result` →
+stability observations → `close-if-stable`, where EVERY destructive step is
+gated on the previous step's parsed `response_variable`. `mode: single`
+everywhere; the latch is the cross-run guard. Reviewers must confirm control-
+line actions are unreachable unless `capture` returned `ok:true` with a
+matching incident id.
 
-## 6. First planned live window
+## 6. Persistent file-only collection (optional, undeployed)
 
-72 hours HA/Z2M continuous or until reproduction, then separate shutdown/reconnect tests if clean. Existing connections mean terminal RAM/fault context may be lost on hard reset; if the first reproduction yields only unexplained silence, recommend independent bench/debug/bridge observation instead of tuning buffers/routes.
+`deploy/t832-collector.service` + `deploy/t832-collector.timer` run `collect`
+every 60 s file-only. Status: `systemctl status t832-collector.timer`;
+logs: `journalctl -u t832-collector.service`. Enable only after §1 holds.
+
+## 7. First planned live window
+
+72 hours HA/Z2M continuous or until reproduction, then separate
+shutdown/reconnect tests if clean. Existing connections mean terminal RAM/fault
+context may be lost on hard reset; if the first reproduction yields only
+unexplained silence, recommend independent bench/debug/bridge observation
+instead of tuning buffers/routes.

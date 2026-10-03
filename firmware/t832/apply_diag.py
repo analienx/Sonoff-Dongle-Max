@@ -11,11 +11,30 @@ import argparse
 import importlib.util
 import json
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
 VARIANT = "T832-DIAG-R0"
+
+
+def candidate_build_id() -> str:
+    """Immutable source identity: short git SHA of the candidate repo checkout."""
+    root = HERE.parent.parent
+    proc = subprocess.run(
+        ["git", "rev-parse", "--short=8", "HEAD"],
+        cwd=str(root),
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise SystemExit(f"cannot determine candidate build id: {proc.stderr.strip()}")
+    value = proc.stdout.strip().lower()
+    if len(value) != 8 or any(c not in "0123456789abcdef" for c in value):
+        raise SystemExit(f"candidate build id is not 8 hex chars: {value!r}")
+    return value
 
 
 def load_control_module():
@@ -59,30 +78,36 @@ def apply_diag(sdk: Path, examples: Path, control_manifest: Path) -> dict[str, A
     mt = sdk / "source/ti/zstack/mt"
     npi = sdk / "source/ti/zstack/npi"
     api = sdk / "source/ti/zstack/stack/api"
-    boot = sdk / "kernel/tirtos7/packages/ti/sysbios/family/arm/cc26xx/Boot.c"
+    startup = sdk / "source/ti/zstack/startup/main.c"
 
     shutil.copy2(HERE / "t832_diag.h", mt / "t832_diag.h")
     shutil.copy2(HERE / "t832_diag_impl.inc", mt / "t832_diag_impl.inc")
 
-    # Capture reset source in the existing SYS/BIOS boot-reason path before
-    # application initialization can obscure the original reset reason.
+    # R06: capture the reset source at the top of main(), the first proven
+    # executed application path. Boot.c/Boot.o is not linked into the ZNP
+    # image (absent from map and symbols), so the previous Boot_getBootReason
+    # writer was dead code. SysCtrlResetSourceGet is a pure register read and
+    # nothing in the image clears the source, so main() entry is the earliest
+    # safe capture point. Validity is marked with T832_DIAG_BOOT_MAGIC and
+    # checked by T832Diag_init before use.
     ex.replace(
-        boot,
-        "uint32_t Boot_getBootReason()\n{\n    return (SysCtrlResetSourceGet());\n}\n",
-        "uint32_t t832DiagResetCauseEarly;\n\n"
-        "uint32_t Boot_getBootReason()\n{\n"
-        "    t832DiagResetCauseEarly = SysCtrlResetSourceGet();\n"
-        "    return t832DiagResetCauseEarly;\n"
-        "}\n",
+        startup,
+        "int main()\n{\n#ifndef USE_DEFAULT_USER_CFG\n",
+        "int main()\n{\n"
+        "    extern void T832Diag_captureResetCauseEarly(uint32_t cause);\n"
+        "    T832Diag_captureResetCauseEarly((uint32_t)SysCtrlResetSourceGet());\n"
+        "#ifndef USE_DEFAULT_USER_CFG\n",
         "diag.boot.reset_cause",
     )
 
     # Compile-time diagnostic identity without changing KCTRL routing/resource semantics.
+    # T832_BUILD_ID is the immutable source identity (candidate short SHA).
+    build_id = candidate_build_id()
     opts = sdk / "source/ti/zstack/apps/znp/znp_cnf.opts"
     ex.replace(
         opts,
         "-DMT_APP_CNF_FUNC\n",
-        "-DMT_APP_CNF_FUNC\n-DT832_DIAG_R0=1\n",
+        f"-DMT_APP_CNF_FUNC\n-DT832_DIAG_R0=1\n-DT832_BUILD_ID=0x{build_id}\n",
         "diag.compile_identity",
     )
 
@@ -175,6 +200,8 @@ def apply_diag(sdk: Path, examples: Path, control_manifest: Path) -> dict[str, A
         "      /* execute processing function */\n      rsp[0] = (*func)(pBuf);\n",
         "      /* execute processing function */\n"
         "      T832Diag_commandDispatch(pBuf[MT_RPC_POS_CMD0], pBuf[MT_RPC_POS_CMD1]);\n"
+        "      T832Diag_afDispatch(pBuf[MT_RPC_POS_CMD0], pBuf[MT_RPC_POS_CMD1],\n"
+        "                          pBuf, pBuf[MT_RPC_POS_LEN]);\n"
         "      rsp[0] = (*func)(pBuf);\n"
         "      T832Diag_commandComplete(pBuf[MT_RPC_POS_CMD0], pBuf[MT_RPC_POS_CMD1], rsp[0]);\n",
         "diag.command.dispatch_complete",
@@ -233,15 +260,57 @@ def apply_diag(sdk: Path, examples: Path, control_manifest: Path) -> dict[str, A
         "      break;\n",
         "diag.bdb.dispatch_return",
     )
+    # R12: true ZStack-task progress, distinct from MT-side startup calls.
+    # ZStackTaskProcessEvent runs in the Zigbee stack task on every stack
+    # event; the hook only timestamps, it never records.
+    ex.replace(
+        ztask,
+        "uint32_t ZStackTaskProcessEvent( uint8_t taskId, uint32_t events )\n"
+        "{\n"
+        "  zstackmsg_sysResetReq_t *pMsg;\n",
+        "uint32_t ZStackTaskProcessEvent( uint8_t taskId, uint32_t events )\n"
+        "{\n"
+        "  zstackmsg_sysResetReq_t *pMsg;\n"
+        "  T832Diag_taskWork(T832_DIAG_WORK_ZSTACK, (uint16_t)events);\n",
+        "diag.zstack.progress",
+    )
+    # R04/R07: NPI-side drop of an MT-accepted frame. RX-side only: the MT
+    # command never fired, so no pending flags are involved here.
+    ex.replace(
+        ztask,
+        "        pOsalMsg->msg = OsalPort_malloc ( MT_RPC_FRAME_HDR_SZ + pReq[MT_RPC_POS_LEN] );\n"
+        "\n"
+        "        if(pOsalMsg->msg) {\n"
+        "          OsalPort_memcpy(pOsalMsg->msg, pReq, (MT_RPC_FRAME_HDR_SZ + pReq[MT_RPC_POS_LEN]) );\n"
+        "\n"
+        "          OsalPort_msgSend( mtTaskID, (byte *)pOsalMsg );\n"
+        "        }\n",
+        "        pOsalMsg->msg = OsalPort_malloc ( MT_RPC_FRAME_HDR_SZ + pReq[MT_RPC_POS_LEN] );\n"
+        "\n"
+        "        if(pOsalMsg->msg) {\n"
+        "          OsalPort_memcpy(pOsalMsg->msg, pReq, (MT_RPC_FRAME_HDR_SZ + pReq[MT_RPC_POS_LEN]) );\n"
+        "\n"
+        "          OsalPort_msgSend( mtTaskID, (byte *)pOsalMsg );\n"
+        "        }\n"
+        "        else {\n"
+        "          T832Diag_npiAllocFailed(2u,\n"
+        "              (uint16_t)(MT_RPC_FRAME_HDR_SZ + pReq[MT_RPC_POS_LEN]),\n"
+        "              pReq[MT_RPC_POS_CMD0], pReq[MT_RPC_POS_CMD1],\n"
+        "              pReq[MT_RPC_POS_LEN]);\n"
+        "        }\n",
+        "diag.zstack.rx_alloc_fail",
+    )
 
     # Observe queueing/allocation independently from physical UART completion.
+    # The payload pointer lets the recorder correlate AF confirms and read
+    # the SRSP AF status byte; NULL payloads are guarded in the recorder.
     client = npi / "npi_client_mt.c"
     include_after(ex, client, '#include "mt_rpc.h"\n', "t832_diag.h", "diag.npi_client.include")
     ex.replace(
         client,
         "    if(pRspMsg != NULL)\n    {\n",
         "    if(pRspMsg != NULL)\n    {\n"
-        "        T832Diag_responseQueued(cmdType, cmdId, dataLen);\n",
+        "        T832Diag_responseQueued(cmdType, cmdId, dataLen, pData);\n",
         "diag.response.queue",
     )
     ex.replace(
@@ -255,6 +324,97 @@ def apply_diag(sdk: Path, examples: Path, control_manifest: Path) -> dict[str, A
         "    }\n\n"
         "    return;\n",
         "diag.response.alloc_fail",
+    )
+
+    # NPI task: the central RX-overflow trap, TX-queue dequeue ownership,
+    # per-wakeup task progress, and the TX-path allocation failure. The trap
+    # itself is preserved; only a fixed-write record precedes it. NPI_SREQRSP
+    # is not defined in the ZNP build, so no sync-queue/watchdog sites exist
+    # to patch (proven by linked-image audit; CI asserts their absence).
+    ntask = npi / "npi_task.c"
+    include_after(ex, ntask, '#include "npi_client.h"\n', "t832_diag.h", "diag.npi_task.include")
+    ex.replace(
+        ntask,
+        "    else\n"
+        "    {\n"
+        "        // Trap here for pending buffer overflow. If NPI_FLOW_CTRL is\n"
+        "        // enabled, increase size of RxBuf to handle larger frames from host.\n"
+        "        for(;;);\n"
+        "    }\n",
+        "    else\n"
+        "    {\n"
+        "        // Trap here for pending buffer overflow. If NPI_FLOW_CTRL is\n"
+        "        // enabled, increase size of RxBuf to handle larger frames from host.\n"
+        "        T832Diag_npiTrap((uint16_t)size, NPIRxBuf_GetRxBufAvail());\n"
+        "        for(;;);\n"
+        "    }\n",
+        "diag.npi_task.rx_trap",
+    )
+    ex.replace(
+        ntask,
+        "    recPtr = Queue_dequeue(npiTxQueue);\n"
+        "\n"
+        "    if (recPtr != NULL)\n"
+        "    {\n"
+        "        NPITL_writeTL(recPtr->npiMsg->pBuf, recPtr->npiMsg->pBufSize);\n",
+        "    recPtr = Queue_dequeue(npiTxQueue);\n"
+        "\n"
+        "    if (recPtr != NULL)\n"
+        "    {\n"
+        "        T832Diag_npiTxDequeue((recPtr->npiMsg->pBuf)[0],\n"
+        "                              (recPtr->npiMsg->pBuf)[2],\n"
+        "                              (recPtr->npiMsg->pBuf)[3],\n"
+        "                              (recPtr->npiMsg->pBuf)[1]);\n"
+        "        NPITL_writeTL(recPtr->npiMsg->pBuf, recPtr->npiMsg->pBufSize);\n",
+        "diag.npi_task.tx_dequeue",
+    )
+    ex.replace(
+        ntask,
+        "        pOsalMsg->msg = OsalPort_malloc( MT_RPC_FRAME_HDR_SZ + pReq[MT_RPC_POS_LEN] );\n"
+        "\n"
+        "        if(pOsalMsg->msg) {\n"
+        "\n"
+        "          memcpy(pOsalMsg->msg, pReq, (MT_RPC_FRAME_HDR_SZ + pReq[MT_RPC_POS_LEN]) );\n"
+        "\n"
+        "          msgStatus = OsalPort_msgSend( MTServiceTaskID, (byte *)pOsalMsg );\n"
+        "        }\n",
+        "        pOsalMsg->msg = OsalPort_malloc( MT_RPC_FRAME_HDR_SZ + pReq[MT_RPC_POS_LEN] );\n"
+        "\n"
+        "        if(pOsalMsg->msg) {\n"
+        "\n"
+        "          memcpy(pOsalMsg->msg, pReq, (MT_RPC_FRAME_HDR_SZ + pReq[MT_RPC_POS_LEN]) );\n"
+        "\n"
+        "          msgStatus = OsalPort_msgSend( MTServiceTaskID, (byte *)pOsalMsg );\n"
+        "        }\n"
+        "        else {\n"
+        "          T832Diag_npiAllocFailed(1u,\n"
+        "              (uint16_t)(MT_RPC_FRAME_HDR_SZ + pReq[MT_RPC_POS_LEN]),\n"
+        "              pReq[MT_RPC_POS_CMD0], pReq[MT_RPC_POS_CMD1],\n"
+        "              pReq[MT_RPC_POS_LEN]);\n"
+        "        }\n",
+        "diag.npi_task.tx_alloc_fail",
+    )
+    ex.replace(
+        ntask,
+        "        /* Wait for response message */\n"
+        "        Semaphore_pend(npiSemHandle, BIOS_WAIT_FOREVER);\n",
+        "        /* Wait for response message */\n"
+        "        Semaphore_pend(npiSemHandle, BIOS_WAIT_FOREVER);\n"
+        "        T832Diag_npiTaskWake();\n",
+        "diag.npi_task.wake",
+    )
+    ex.replace(
+        ntask,
+        "    if ( pNPIMsg != NULL && recPtr != NULL )\n"
+        "    {\n"
+        "        recPtr->npiMsg = pNPIMsg;\n",
+        "    if ( pNPIMsg != NULL && recPtr != NULL )\n"
+        "    {\n"
+        "        recPtr->npiMsg = pNPIMsg;\n"
+        "        T832Diag_npiTxQueuedOther(pMsg[MT_RPC_POS_CMD0],\n"
+        "                                  pMsg[MT_RPC_POS_CMD1],\n"
+        "                                  pMsg[MT_RPC_POS_LEN]);\n",
+        "diag.npi_task.send_to_host",
     )
 
     # UART: effective config, RX progress/overflow, write start/rejection and

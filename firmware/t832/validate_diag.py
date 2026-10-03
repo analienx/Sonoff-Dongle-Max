@@ -30,7 +30,10 @@ def main() -> int:
 
     transport = manifest["transport"]
     require(transport["envelope"] == "AREQ DEBUG.msg", "transport must remain DEBUG.msg AREQ")
+    require(transport["schema"] == 2, "diagnostic schema must be 2 (length-prefixed batch)")
+    require(transport["length_prefixed"] is True, "DEBUG payload must carry the string length prefix")
     require(transport["maximum_payload_bytes"] <= 240, "diagnostic payload exceeds 240 bytes")
+    require(transport["maximum_records_per_frame"] <= 4, "batch exceeds frame budget")
     require(transport["minimum_export_interval_ms"] >= 5000, "telemetry faster than one frame/5 s")
     require(transport["health_snapshot_interval_ms"] == 10000, "health snapshot must be 10 s")
     require(transport["resource_snapshot_interval_ms"] == 60000, "resource snapshot must be 60 s")
@@ -59,12 +62,29 @@ def main() -> int:
     require("T832_DIAG_EV_NPI_WRITE_REJECT" in runtime, "write rejection instrumentation missing")
     require("T832_DIAG_EV_NPI_TX_FINISHED" in runtime, "physical TX-completion instrumentation missing")
     require("T832_DIAG_EV_STARTUP_BDB_REQUEST" in runtime, "startup BDB request instrumentation missing")
+    require("T832_DIAG_SCHEMA_VERSION 2u" in header, "schema version must be 2")
+    require("T832_DIAG_BATCH_MAX 4u" in header, "batch bound missing")
+    require("T832_DIAG_BOOT_MAGIC" in header, "boot validity marker missing")
     require("T832_DIAG_CAP_RESET_CAUSE" in header, "early reset-cause capability missing")
-    require("t832DiagResetCauseEarly" in patcher and "Boot_getBootReason" in patcher, "early reset-cause patch missing")
+    require("T832Diag_captureResetCauseEarly" in patcher, "early reset-cause hook missing")
+    require("source/ti/zstack/startup/main.c" in patcher, "main() capture patch missing")
+    require("SysCtrlResetSourceGet" in patcher, "reset-source read missing from patch")
+    require("Boot_getBootReason" not in patcher, "dead Boot_getBootReason writer must stay removed")
+    require("T832_BUILD_ID" in patcher, "immutable build identity missing from patch")
+    require("npi_task.c" in patcher, "NPI task patch missing")
+    require("T832Diag_npiTrap" in patcher, "NPI trap hook missing")
+    require("NPITL_writeTL" in patcher, "TX dequeue hook missing")
+    require("NPITask_sendToHost" in patcher, "app-originated TX hook missing")
+    require("T832Diag_afDispatch" in patcher, "AF dispatch hook missing")
+    require("ZStackTaskProcessEvent" in patcher, "ZStack progress hook missing")
     require("T832Diag_networkState" in patcher, "existing-network resume-state hook missing")
     require("T832Diag_uartRxOverflow" in patcher, "UART overflow hook missing")
     require("T832Diag_uartTxFinished" in patcher, "UART completion hook missing")
-    require("T832_DIAG_CAP_TASK_MODES" in header, "task-modes capability missing")
+    require("T832_DIAG_CAP_MT_EVENTS" in header, "MT event-mask capability missing")
+    require("T832_DIAG_CAP_TASK_MODES" not in header, "TASK_MODES label must stay renamed: it observes event masks, not task states")
+    require("T832_DIAG_CAP_TX_OWNERSHIP" in header, "TX ownership capability missing")
+    require("T832_DIAG_CAP_AF_ACCEPT" in header, "AF accept-table capability missing")
+    require("T832_DIAG_CAP_BATCHED_V2" in header, "batched schema capability missing")
     require("T832_DIAG_CAP_NV_COMPACT" in header, "NV compaction capability missing")
     require("T832_DIAG_CAP_AF_AGE" in header, "AF outstanding-age capability missing")
     require("T832_DIAG_EV_TASK_EVENTS" in header, "task-events kind missing")
@@ -81,11 +101,18 @@ def main() -> int:
     require("gAction = action;" in patcher, "NV init-action hook missing")
     require("T832Diag_nvInit((uint8_t)action)" in patcher, "NV init hook call missing")
 
+    require("T832D2:" in runtime, "schema-2 text prefix missing")
+    require("out[0] = strLen" in runtime, "length-prefix store missing from exporter")
+
     # Hot hook bodies must remain observational only. Export is intentionally excluded.
     hook_names = [
-        "T832Diag_taskScheduled", "T832Diag_taskWork", "T832Diag_commandRx",
-        "T832Diag_commandDispatch", "T832Diag_commandComplete",
+        "T832Diag_captureResetCauseEarly",
+        "T832Diag_taskScheduled", "T832Diag_taskWork", "T832Diag_npiTaskWake",
+        "T832Diag_commandRx",
+        "T832Diag_commandDispatch", "T832Diag_afDispatch", "T832Diag_commandComplete",
         "T832Diag_responseQueued", "T832Diag_responseAllocFailed",
+        "T832Diag_npiTxQueuedOther", "T832Diag_npiTxDequeue",
+        "T832Diag_npiTrap", "T832Diag_npiAllocFailed",
         "T832Diag_uartConfigured", "T832Diag_uartRx", "T832Diag_uartRxOverflow",
         "T832Diag_uartTxStart", "T832Diag_uartWriteRejected",
         "T832Diag_uartTxFinished", "T832Diag_startup",
