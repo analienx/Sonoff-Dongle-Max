@@ -35,7 +35,13 @@ except ImportError:  # Windows: no fcntl; msvcrt locking is the OS primitive.
 
     def _lock_exclusive(fd: int) -> None:
         if os.fstat(fd).st_size == 0:
-            os.write(fd, b"\x00")
+            try:
+                os.write(fd, b"\x00")
+            except OSError:
+                # Lost a creation race: another locker filled the byte and
+                # already holds this region. Fall through to the blocking
+                # lock below, which then serializes correctly.
+                pass
         # Lock a fixed region: the fill above leaves the offset at 1, which
         # would lock a disjoint byte and silently disable exclusion.
         os.lseek(fd, 0, os.SEEK_SET)
@@ -506,6 +512,16 @@ def read_increment(
         offset = 0
     elif stat.st_size < offset:
         notes.append(f"truncated:{path}")
+        offset = 0
+    elif (
+        offset
+        and stat.st_size == offset
+        and cursor.get("mtime_ns") is not None
+        and int(cursor.get("mtime_ns")) != stat.st_mtime_ns
+    ):
+        # Same inode and same size but rewritten (Linux reuses inode numbers
+        # on quick recreate): the committed prefix is stale, reread it.
+        notes.append(f"rotated:{path}")
         offset = 0
     pending = str(cursor.get("partial") or "")
     rows: list[tuple[int, str]] = []

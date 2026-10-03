@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import struct
 import tempfile
 import threading
@@ -270,6 +271,23 @@ class CollectorTests(unittest.TestCase):
             )
             self.assertEqual(again["diag_records"], 1)
             self.assertTrue(any(n.startswith("rotated:") for n in again["notes"]))
+            # Same inode, same size, new mtime (in-place rewrite without
+            # unlink): identity and size checks are blind, the mtime guard
+            # must still reset to zero instead of resuming at stale EOF.
+            with log.open("w", encoding="utf-8") as fh:
+                fh.write(
+                    "2026-10-03T09:00:00Z zh:zstack:znp "
+                    f"T832D1:{packet_hex(export_sequence=2, uptime_ms=2000)}\n"
+                )
+            # Deterministic mtime step even on coarse-grained filesystems.
+            anchor = log.stat()
+            os.utime(log, (anchor.st_atime + 2, anchor.st_mtime + 2))
+            rewritten = incident.collect(
+                store, [str(log)], config_fingerprint=None,
+                initial_tail_bytes=1024 * 1024, retain_days=7, max_bytes=1 << 30,
+            )
+            self.assertEqual(rewritten["diag_records"], 1)
+            self.assertTrue(any(n.startswith("rotated:") for n in rewritten["notes"]))
             with log.open("w", encoding="utf-8") as fh:
                 fh.write("short\n")
             trunc = incident.collect(
