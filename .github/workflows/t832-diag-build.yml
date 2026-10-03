@@ -38,6 +38,15 @@ jobs:
           python3 repo/firmware/t832/validate_manifest.py repo/firmware/t832/manifest.json
           python3 repo/firmware/t832/validate_diag.py --root repo/firmware/t832
           python3 -m unittest repo/firmware/t832/test_diag.py -v
+          gcc -std=c11 -Wall -Wextra \
+            -I repo/firmware/t832 \
+            -I repo/firmware/t832/host_harness \
+            -I repo/firmware/t832/host_harness/stubs \
+            repo/firmware/t832/host_harness/t832_diag_host_test.c \
+            -o /tmp/t832harness \
+            -Wl,--wrap=malloc -Wl,--wrap=calloc \
+            -Wl,--wrap=realloc -Wl,--wrap=free
+          /tmp/t832harness
           python3 -m py_compile             repo/firmware/t832/apply_diag.py             repo/firmware/t832/t832_diag_decode.py             repo/firmware/t832/t832_incident.py
 
       - name: Install CCS 12.8.0 SimpleLink toolchain
@@ -180,6 +189,7 @@ jobs:
               "source/ti/zstack/stack/nwk/nwk_globals.c",
           }
           diag_allowed = control_allowed | {
+              "source/ti/common/nv/nvocmp.c",
               "kernel/tirtos7/packages/ti/sysbios/family/arm/cc26xx/Boot.c",
               "source/ti/zstack/mt/mt.c",
               "source/ti/zstack/mt/mt.h",

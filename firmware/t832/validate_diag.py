@@ -64,6 +64,22 @@ def main() -> int:
     require("T832Diag_networkState" in patcher, "existing-network resume-state hook missing")
     require("T832Diag_uartRxOverflow" in patcher, "UART overflow hook missing")
     require("T832Diag_uartTxFinished" in patcher, "UART completion hook missing")
+    require("T832_DIAG_CAP_TASK_MODES" in header, "task-modes capability missing")
+    require("T832_DIAG_CAP_NV_COMPACT" in header, "NV compaction capability missing")
+    require("T832_DIAG_CAP_AF_AGE" in header, "AF outstanding-age capability missing")
+    require("T832_DIAG_EV_TASK_EVENTS" in header, "task-events kind missing")
+    require("T832_DIAG_EV_NV_EVENT" in header, "NV event kind missing")
+    require("T832_DIAG_EV_AF_STATE" in header, "AF state kind missing")
+    require("T832_DIAG_EV_NV_FAULT" in header, "NV fault kind missing")
+    require("T832Diag_nvEvent" in runtime, "NV compaction instrumentation missing")
+    require("T832Diag_nvInit" in runtime, "NV init-action instrumentation missing")
+    require("mt_sticky_events" in runtime, "MT event-bit tracking missing")
+    require("af_outstanding" in runtime, "AF outstanding tracking missing")
+    require("MT_AF_DATA_CONFIRM" in runtime, "AF confirm correlation missing")
+    require("nvocmp.c" in patcher, "NV source patch missing")
+    require("NVOCMP_compact(pNvHandle)" in patcher, "NV compaction hook missing")
+    require("gAction = action;" in patcher, "NV init-action hook missing")
+    require("T832Diag_nvInit((uint8_t)action)" in patcher, "NV init hook call missing")
 
     # Hot hook bodies must remain observational only. Export is intentionally excluded.
     hook_names = [
@@ -74,6 +90,7 @@ def main() -> int:
         "T832Diag_uartTxStart", "T832Diag_uartWriteRejected",
         "T832Diag_uartTxFinished", "T832Diag_startup",
         "T832Diag_networkState", "T832Diag_bdb", "T832Diag_rxBufferFull",
+        "T832Diag_nvEvent", "T832Diag_nvInit",
     ]
     banned = re.compile(r"\b(malloc|calloc|realloc|free|printf|fprintf|UART2_write|flash|sleep|Task_sleep)\b")
     for name in hook_names:
@@ -89,6 +106,11 @@ def main() -> int:
     require("default=30" in host, "30-second capture deadline missing")
     require("automatic-reset-already-consumed" in host, "one-reset latch guard missing")
     require("stability-window-not-complete" in host, "10-minute stability close guard missing")
+
+    harness = (root / "host_harness" / "t832_diag_host_test.c").read_text(encoding="utf-8")
+    require("T832-DIAG-R0 host harness marker" in harness, "host harness marker missing")
+    require('#include "t832_diag_impl.inc"' in harness, "harness must exercise the real recorder")
+    require("MT_BuildAndSendZToolResponse" in harness, "harness export stub missing")
 
     print("T832-DIAG-R0 policy contract: PASS")
     return 0

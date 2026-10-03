@@ -278,6 +278,11 @@ class ProtocolEdgeTests(unittest.TestCase):
             decoded = incident.decode_packet(packet_hex(event_kind=kind))
             self.assertEqual(decoded["record"]["kind_name"], name)
 
+    def test_gap_closure_kinds_decode(self) -> None:
+        for kind, name in ((26, "TASK_EVENTS"), (27, "NV_EVENT"), (28, "AF_STATE"), (29, "NV_FAULT")):
+            decoded = incident.decode_packet(packet_hex(event_kind=kind))
+            self.assertEqual(decoded["record"]["kind_name"], name)
+
     def test_rotation_cap_and_collector_restart(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

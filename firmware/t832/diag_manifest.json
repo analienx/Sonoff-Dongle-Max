@@ -36,12 +36,12 @@
     "existing_network_resume_state": true,
     "aggregated_progress_counters": true,
     "transport_resource_maxima": true,
-    "task_modes": false,
+    "task_modes": true,
     "heap_free_min_largest": false,
     "global_allocation_failure_sites": false,
     "stack_watermarks": false,
-    "af_outstanding_age": false,
-    "nv_compaction_phase": false,
+    "af_outstanding_age": true,
+    "nv_compaction_phase": true,
     "fault_pc_lr_sp_registers": false
   },
   "release_gate_required_capabilities": [
@@ -55,7 +55,10 @@
     "sync_request_suppression_observation",
     "reset_cause_before_clear",
     "existing_network_resume_state",
-    "aggregated_progress_counters"
+    "aggregated_progress_counters",
+    "task_modes",
+    "af_outstanding_age",
+    "nv_compaction_phase"
   ],
   "unsupported_policy": "Unsupported observations are exported/decoded as unavailable; absence is never interpreted as CPU failure.",
   "firmware_identity": {

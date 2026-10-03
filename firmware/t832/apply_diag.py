@@ -316,6 +316,61 @@ def apply_diag(sdk: Path, examples: Path, control_manifest: Path) -> dict[str, A
         "diag.uart.tx_finished",
     )
 
+    # NV compaction begin/end/failure/duration, recovery reformat entry, and
+    # init/recovery action breadcrumbs. Hooks only record; erase/reformat
+    # policy (NVOCMP_RECOVER_FROM_COMPACT_FAILURE) is unchanged.
+    nv = sdk / "source/ti/common/nv/nvocmp.c"
+    ex.replace(
+        nv,
+        '#include "nvocmp.h"\n',
+        '#include "nvocmp.h"\n'
+        "\n"
+        "extern void T832Diag_nvEvent(uint8_t stage, uint16_t b, uint16_t c);\n"
+        "extern void T832Diag_nvInit(uint8_t action);\n",
+        "diag.nv.decls",
+    )
+    ex.replace(
+        nv,
+        "    status = NVOCMP_compact(pNvHandle);\n",
+        "    T832Diag_nvEvent(1u, nBytes, 0u);\n"
+        "    status = NVOCMP_compact(pNvHandle);\n"
+        "    T832Diag_nvEvent(status == NVOCMP_COMPACT_FAILURE ? 3u : 2u,"
+        " (uint16_t)status, 0u);\n",
+        "diag.nv.compact_site_4sp",
+    )
+    ex.replace(
+        nv,
+        "  status = NVOCMP_compact(pNvHandle);\n",
+        "  T832Diag_nvEvent(1u, nBytes, 0u);\n"
+        "  status = NVOCMP_compact(pNvHandle);\n"
+        "  T832Diag_nvEvent(status == NVOCMP_COMPACT_FAILURE ? 3u : 2u,"
+        " (uint16_t)status, 0u);\n",
+        "diag.nv.compact_site_2sp",
+    )
+    ex.replace(
+        nv,
+        "#ifdef NVOCMP_RECOVER_FROM_COMPACT_FAILURE\n        uint8_t p;\n",
+        "#ifdef NVOCMP_RECOVER_FROM_COMPACT_FAILURE\n"
+        "        uint8_t p;\n"
+        "        T832Diag_nvEvent(4u, NVOCMP_NVSIZE, 0u);\n",
+        "diag.nv.reformat_8sp",
+    )
+    ex.replace(
+        nv,
+        "#ifdef NVOCMP_RECOVER_FROM_COMPACT_FAILURE\n      uint8_t p;\n",
+        "#ifdef NVOCMP_RECOVER_FROM_COMPACT_FAILURE\n"
+        "      uint8_t p;\n"
+        "      T832Diag_nvEvent(4u, NVOCMP_NVSIZE, 0u);\n",
+        "diag.nv.reformat_6sp",
+    )
+    ex.replace(
+        nv,
+        "  gAction = action;\n",
+        "  gAction = action;\n  T832Diag_nvInit((uint8_t)action);\n",
+        "diag.nv.init_action",
+        count=3,
+    )
+
     return {
         "variant": VARIANT,
         "control": control_evidence,

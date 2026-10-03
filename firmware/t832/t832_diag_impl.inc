@@ -50,6 +50,8 @@ typedef struct {
   uint32_t zstack_work_ms;
   uint32_t tx_start_ms;
   uint32_t oldest_pending_ms;
+  uint32_t af_oldest_ms;
+  uint32_t nv_start_ms;
   uint32_t mt_schedule_count;
   uint32_t mt_work_count;
   uint32_t npi_rx_count;
@@ -67,6 +69,10 @@ typedef struct {
   uint16_t normal_pending;
   uint16_t normal_pending_max;
   uint16_t tx_age_max;
+  uint16_t af_outstanding;
+  uint16_t af_outstanding_max;
+  uint16_t mt_last_events;
+  uint16_t mt_sticky_events;
   uint8_t mt_task_id;
   uint8_t sync_outstanding;
   uint8_t response_queued;
@@ -103,7 +109,8 @@ static uint8_t T832Diag_isCritical(uint8_t kind)
           kind == T832_DIAG_EV_NPI_WRITE_REJECT ||
           kind == T832_DIAG_EV_RESPONSE_ALLOC_FAIL ||
           kind == T832_DIAG_EV_FIRST_FAULT ||
-          kind == T832_DIAG_EV_RX_BUFFER_FULL);
+          kind == T832_DIAG_EV_RX_BUFFER_FULL ||
+          kind == T832_DIAG_EV_NV_FAULT);
 }
 
 static void T832Diag_record(uint8_t kind, uint16_t a, uint16_t b, uint16_t c)
@@ -159,7 +166,8 @@ void T832Diag_init(uint8_t mtTaskId)
       T832_DIAG_CAP_COMMAND_PATH | T832_DIAG_CAP_SYNC_GATE |
       T832_DIAG_CAP_RX_HWM | T832_DIAG_CAP_QUEUE_APPROX |
       T832_DIAG_CAP_RESET_CAUSE | T832_DIAG_CAP_NETWORK_STATE |
-      T832_DIAG_CAP_AGG_COUNTERS;
+      T832_DIAG_CAP_AGG_COUNTERS | T832_DIAG_CAP_TASK_MODES |
+      T832_DIAG_CAP_NV_COMPACT | T832_DIAG_CAP_AF_AGE;
   t832Diag.reset_cause = t832DiagResetCauseEarly;
   t832Diag.initialized = 1u;
   T832Diag_record(T832_DIAG_EV_BOOT, (uint16_t)t832Diag.reset_cause,
@@ -170,8 +178,9 @@ void T832Diag_taskScheduled(uint8_t taskId, uint32_t events)
 {
   t832Diag.mt_sched_ms = (uint32_t)T832Diag_nowMs();
   t832Diag.mt_schedule_count++;
+  t832Diag.mt_last_events = (uint16_t)events;
+  t832Diag.mt_sticky_events |= (uint16_t)events;
   (void)taskId;
-  (void)events;
 }
 
 void T832Diag_taskWork(uint8_t area, uint16_t detail)
@@ -197,13 +206,41 @@ void T832Diag_commandRx(uint8_t cmd0, uint8_t cmd1)
   T832Diag_record(T832_DIAG_EV_MT_COMMAND_RX, cmd0, cmd1, t832Diag.sync_outstanding);
 }
 
+static uint8_t T832Diag_isAfDataRequest(uint8_t cmd0, uint8_t cmd1)
+{
+  uint8_t type = (uint8_t)(cmd0 & MT_RPC_CMD_TYPE_MASK);
+  if ((cmd0 & MT_RPC_SUBSYSTEM_MASK) != MT_RPC_SYS_AF) return 0u;
+  if (type != MT_RPC_CMD_SREQ && type != MT_RPC_CMD_AREQ) return 0u;
+  return (uint8_t)(cmd1 == MT_AF_DATA_REQUEST ||
+                   cmd1 == MT_AF_DATA_REQUEST_EXT ||
+                   cmd1 == MT_AF_DATA_REQUEST_SRCRTG);
+}
+
+static void T832Diag_afResolveOne(void)
+{
+  if (t832Diag.af_outstanding) {
+    t832Diag.af_outstanding--;
+    if (!t832Diag.af_outstanding) t832Diag.af_oldest_ms = 0u;
+  }
+}
+
 void T832Diag_commandDispatch(uint8_t cmd0, uint8_t cmd1)
 {
+  if (T832Diag_isAfDataRequest(cmd0, cmd1)) {
+    if (!t832Diag.af_outstanding) {
+      t832Diag.af_oldest_ms = (uint32_t)T832Diag_nowMs();
+    }
+    if (t832Diag.af_outstanding != 0xFFFFu) t832Diag.af_outstanding++;
+    if (t832Diag.af_outstanding > t832Diag.af_outstanding_max) {
+      t832Diag.af_outstanding_max = t832Diag.af_outstanding;
+    }
+  }
   T832Diag_record(T832_DIAG_EV_MT_COMMAND_DISPATCH, cmd0, cmd1, 0u);
 }
 
 void T832Diag_commandComplete(uint8_t cmd0, uint8_t cmd1, uint8_t status)
 {
+  if (status && T832Diag_isAfDataRequest(cmd0, cmd1)) T832Diag_afResolveOne();
   T832Diag_record(T832_DIAG_EV_MT_COMMAND_COMPLETE, cmd0, cmd1, status);
 }
 
@@ -213,6 +250,11 @@ void T832Diag_responseQueued(uint8_t cmdType, uint8_t cmdId, uint8_t dataLen)
       ((cmdType & MT_RPC_CMD_TYPE_MASK) == MT_RPC_CMD_AREQ) &&
       cmdId == MT_DEBUG_MSG) {
     return;
+  }
+  if (((cmdType & MT_RPC_CMD_TYPE_MASK) == MT_RPC_CMD_AREQ) &&
+      ((cmdType & MT_RPC_SUBSYSTEM_MASK) == MT_RPC_SYS_AF) &&
+      cmdId == MT_AF_DATA_CONFIRM) {
+    T832Diag_afResolveOne();
   }
   if (t832Diag.normal_pending == 0u) t832Diag.oldest_pending_ms = (uint32_t)T832Diag_nowMs();
   if (t832Diag.normal_pending != 0xFFFFu) t832Diag.normal_pending++;
@@ -313,6 +355,30 @@ void T832Diag_rxBufferFull(void)
   T832Diag_record(T832_DIAG_EV_RX_BUFFER_FULL, 0u, 0u, 0u);
 }
 
+void T832Diag_nvEvent(uint8_t stage, uint16_t b, uint16_t c)
+{
+  (void)c;
+  if (stage == 1u) {
+    t832Diag.nv_start_ms = (uint32_t)T832Diag_nowMs();
+    T832Diag_record(T832_DIAG_EV_NV_EVENT, 1u, b, 0u);
+  } else if (stage == 2u || stage == 3u) {
+    uint16_t dur = (uint16_t)((uint32_t)T832Diag_nowMs() - t832Diag.nv_start_ms);
+    T832Diag_record(stage == 3u ? T832_DIAG_EV_NV_FAULT : T832_DIAG_EV_NV_EVENT,
+                    stage, b, dur);
+  } else if (stage == 4u) {
+    T832Diag_record(T832_DIAG_EV_NV_FAULT, 4u, b, 0u);
+  }
+}
+
+void T832Diag_nvInit(uint8_t action)
+{
+  if (action >= 2u) {
+    T832Diag_record(T832_DIAG_EV_NV_FAULT, 0u, action, 0u);
+  } else {
+    T832Diag_record(T832_DIAG_EV_NV_EVENT, 5u, action, 0u);
+  }
+}
+
 static uint8_t T832Diag_pop(T832DiagRecord *out)
 {
   uint32_t key = OsalPort_enterCS();
@@ -379,6 +445,16 @@ void T832Diag_exportPoll(void)
     uint16_t mtAge = mtAge32 > 0xFFFFu ? 0xFFFFu : (uint16_t)mtAge32;
     uint16_t npiAge = npiAge32 > 0xFFFFu ? 0xFFFFu : (uint16_t)npiAge32;
     T832Diag_record(T832_DIAG_EV_HEALTH, scheduleCount, mtAge, npiAge);
+    T832Diag_record(T832_DIAG_EV_TASK_EVENTS, t832Diag.mt_last_events,
+                    t832Diag.mt_sticky_events,
+                    (uint16_t)(t832Diag.mt_schedule_count & 0xFFFFu));
+    {
+      uint32_t afAge32 = t832Diag.af_outstanding ?
+          now - t832Diag.af_oldest_ms : 0u;
+      uint16_t afAge = afAge32 > 0xFFFFu ? 0xFFFFu : (uint16_t)afAge32;
+      T832Diag_record(T832_DIAG_EV_AF_STATE, t832Diag.af_outstanding, afAge,
+                      t832Diag.af_outstanding_max);
+    }
     t832Diag.last_health_schedule_count = t832Diag.mt_schedule_count;
     t832Diag.last_health_ms = now;
   }

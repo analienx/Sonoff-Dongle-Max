@@ -52,6 +52,10 @@ EVENT_NAMES = {
     23: "RX_BUFFER_FULL",
     24: "NETWORK_STATE",
     25: "TRANSPORT_CONFIG",
+    26: "TASK_EVENTS",
+    27: "NV_EVENT",
+    28: "AF_STATE",
+    29: "NV_FAULT",
 }
 
 

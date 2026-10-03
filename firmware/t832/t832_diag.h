@@ -18,6 +18,9 @@
 #define T832_DIAG_CAP_RESET_CAUSE   (1u << 10)
 #define T832_DIAG_CAP_NETWORK_STATE (1u << 11)
 #define T832_DIAG_CAP_AGG_COUNTERS  (1u << 12)
+#define T832_DIAG_CAP_TASK_MODES    (1u << 13)
+#define T832_DIAG_CAP_NV_COMPACT    (1u << 14)
+#define T832_DIAG_CAP_AF_AGE        (1u << 15)
 
 enum {
   T832_DIAG_EV_BOOT = 1,
@@ -44,7 +47,11 @@ enum {
   T832_DIAG_EV_FIRST_FAULT,
   T832_DIAG_EV_RX_BUFFER_FULL,
   T832_DIAG_EV_NETWORK_STATE,
-  T832_DIAG_EV_TRANSPORT_CONFIG
+  T832_DIAG_EV_TRANSPORT_CONFIG,
+  T832_DIAG_EV_TASK_EVENTS,
+  T832_DIAG_EV_NV_EVENT,
+  T832_DIAG_EV_AF_STATE,
+  T832_DIAG_EV_NV_FAULT
 };
 
 enum {
@@ -71,6 +78,8 @@ void T832Diag_startup(uint8_t stage, uint8_t cmd0, uint8_t cmd1);
 void T832Diag_networkState(uint8_t onNetwork, uint8_t nwkState);
 void T832Diag_bdb(uint8_t stage, uint16_t detail);
 void T832Diag_rxBufferFull(void);
+void T832Diag_nvEvent(uint8_t stage, uint16_t b, uint16_t c);
+void T832Diag_nvInit(uint8_t action);
 void T832Diag_exportPoll(void);
 
 #endif

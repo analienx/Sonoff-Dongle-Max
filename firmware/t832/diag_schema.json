@@ -58,7 +58,11 @@
     "22": "FIRST_FAULT",
     "23": "RX_BUFFER_FULL",
     "24": "NETWORK_STATE",
-    "25": "TRANSPORT_CONFIG"
+    "25": "TRANSPORT_CONFIG",
+    "26": "TASK_EVENTS",
+    "27": "NV_EVENT",
+    "28": "AF_STATE",
+    "29": "NV_FAULT"
   },
   "event_semantics": {
     "BOOT": "a=early reset cause, b=MT task id, c=low 16 capability bits",
@@ -66,6 +70,10 @@
     "RESOURCE:a=1": "b=RX high-water bytes, c=max approximate normal NPI queue depth",
     "RESOURCE:a=2": "b=max observed TX-active age ms, c=Zigbee-stack work age ms",
     "NETWORK_STATE": "a=bdbNodeIsOnANetwork, b=_NIB.nwkState",
-    "TRANSPORT_CONFIG": "a=baud/100, b=NPI flow-control setting"
+    "TRANSPORT_CONFIG": "a=baud/100, b=NPI flow-control setting",
+    "TASK_EVENTS": "a=last MT task event bits, b=sticky MT task event bits since boot, c=low 16 of total MT schedule count",
+    "NV_EVENT": "a=1 compact begin (b=min bytes), a=2 compact end ok (b=status, c=duration ms), a=5 NV init normal (b=init action)",
+    "AF_STATE": "a=AF data requests awaiting confirm, b=oldest age ms, c=max outstanding",
+    "NV_FAULT": "a=3 compact failure (b=status, c=duration ms), a=4 recovery reformat entry (b=NV page count), or a=0 abnormal NV init (b=init action)"
   }
 }
