@@ -225,6 +225,26 @@ jobs:
             --examples examples \
             --evidence build-evidence/project-seed-compatibility.json
 
+      - name: Build pinned SDK libraries with TI documented CMake flow
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v cmake >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends cmake
+          fi
+          cmake --version
+          export TICLANG_ARMCOMPILER="$(dirname "$(dirname "$TIARMCLANG")")"
+          export XDC_INSTALL_DIR="$XDC"
+          export SYSCONFIG_TOOL="$SYSCONFIG"
+          export GCC_ARMCOMPILER=
+          export IAR_ARMCOMPILER=
+          make -C sdk build-ticlang
+          {
+            echo "## T832 SDK libraries"
+            echo "- TI-documented top-level CMake library build (ticlang only) completed before the application link."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Register pinned F2 SDK and SysConfig with CCS
         shell: bash
         run: |
