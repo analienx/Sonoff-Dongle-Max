@@ -331,7 +331,9 @@ def apply_diag(sdk: Path, examples: Path, control_manifest: Path) -> dict[str, A
     )
     ex.replace(
         nv,
+        "    pNvHandle->compactInfo.xSrcEOffset = 0;\n"
         "    status = NVOCMP_compact(pNvHandle);\n",
+        "    pNvHandle->compactInfo.xSrcEOffset = 0;\n"
         "    T832Diag_nvEvent(1u, nBytes, 0u);\n"
         "    status = NVOCMP_compact(pNvHandle);\n"
         "    T832Diag_nvEvent(status == NVOCMP_COMPACT_FAILURE ? 3u : 2u,"
@@ -340,7 +342,9 @@ def apply_diag(sdk: Path, examples: Path, control_manifest: Path) -> dict[str, A
     )
     ex.replace(
         nv,
+        "  pNvHandle->compactInfo.xSrcSOffset = pNvHandle->pageInfo[srcPg].offset;\n"
         "  status = NVOCMP_compact(pNvHandle);\n",
+        "  pNvHandle->compactInfo.xSrcSOffset = pNvHandle->pageInfo[srcPg].offset;\n"
         "  T832Diag_nvEvent(1u, nBytes, 0u);\n"
         "  status = NVOCMP_compact(pNvHandle);\n"
         "  T832Diag_nvEvent(status == NVOCMP_COMPACT_FAILURE ? 3u : 2u,"
@@ -349,19 +353,11 @@ def apply_diag(sdk: Path, examples: Path, control_manifest: Path) -> dict[str, A
     )
     ex.replace(
         nv,
-        "#ifdef NVOCMP_RECOVER_FROM_COMPACT_FAILURE\n        uint8_t p;\n",
+        "#ifdef NVOCMP_RECOVER_FROM_COMPACT_FAILURE",
         "#ifdef NVOCMP_RECOVER_FROM_COMPACT_FAILURE\n"
-        "        uint8_t p;\n"
-        "        T832Diag_nvEvent(4u, NVOCMP_NVSIZE, 0u);\n",
-        "diag.nv.reformat_8sp",
-    )
-    ex.replace(
-        nv,
-        "#ifdef NVOCMP_RECOVER_FROM_COMPACT_FAILURE\n      uint8_t p;\n",
-        "#ifdef NVOCMP_RECOVER_FROM_COMPACT_FAILURE\n"
-        "      uint8_t p;\n"
-        "      T832Diag_nvEvent(4u, NVOCMP_NVSIZE, 0u);\n",
-        "diag.nv.reformat_6sp",
+        "        T832Diag_nvEvent(4u, NVOCMP_NVSIZE, 0u);",
+        "diag.nv.reformat_entry",
+        count=2,
     )
     ex.replace(
         nv,
