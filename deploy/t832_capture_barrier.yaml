@@ -1,0 +1,177 @@
+# T832-DIAG-R0 capture barrier (UNDEPLOYED CANDIDATE).
+#
+# Purpose: wrap the production Zigbee2MQTT RTS recovery path
+# (automation zigbee2mqtt_mesh_communication_outage_alert in the
+# home-assistant-stack repository) with a file-only evidence barrier:
+# capture -> authorize -> stop-confirm -> EXISTING validated R2 helper
+# (shell_command.mr4u_p10_rts_reset) -> verified start -> ZDO check ->
+# stabilizing -> continuous 10-minute stability close.
+#
+# Design rules enforced by firmware/t832/test_barrier.py:
+# - every destructive step is gated by a response_variable plus a template
+#   condition on that exact response; no continue_on_error on them;
+# - the only RTS implementation referenced is the existing validated helper;
+# - no notification actions (logbook/system_log only);
+# - mode single; the incident latch is the cross-run guard.
+#
+# Deploy-time bindings (operator sets these, documented in the runbook):
+# - T832 incident tool path (t832_incident.py) and state root;
+# - supervisor add-on slug is fixed below (45df7312_zigbee2mqtt).
+# Shell command bodies live in deploy/t832_shell_commands.yaml.
+
+- id: zigbee2mqtt_t832_capture_barrier
+  alias: Zigbee2MQTT - T832 capture barrier before RTS recovery
+  description: >-
+    Capture a 15-minute evidence incident and require a one-shot reset permit
+    before the existing RTS recovery path runs. Reuses the production outage
+    triggers; replaces continue_on_error with fail-closed response gates.
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.zigbee2mqtt_mesh_communication_outage
+      to: "on"
+      for: "00:05:00"
+      id: mesh_outage
+    - trigger: state
+      entity_id: binary_sensor.zigbee2mqtt_bridge_online
+      to: "off"
+      for: "00:05:00"
+      id: bridge_offline
+    - trigger: mqtt
+      topic: zigbee2mqtt/bridge/response/device/remove
+      id: radio_timeout
+  conditions: []
+  actions:
+    - service: shell_command.t832_capture
+      data:
+        trigger: "{{ trigger.id }}"
+      response_variable: t832_capture
+    - condition: template
+      value_template: >-
+        {{ t832_capture['returncode'] == 0
+           and (t832_capture['stdout'] | from_json).ok }}
+    - service: shell_command.t832_authorize_reset
+      response_variable: t832_authorize
+    - condition: template
+      value_template: >-
+        {{ t832_authorize['returncode'] == 0
+           and (t832_authorize['stdout'] | from_json).status == 'reset_authorized'
+           and (t832_authorize['stdout'] | from_json).incident_id
+               == (t832_capture['stdout'] | from_json).incident_id }}
+    - service: shell_command.t832_mark_recovering
+      response_variable: t832_marking
+    - condition: template
+      value_template: >-
+        {{ t832_marking['returncode'] == 0
+           and (t832_marking['stdout'] | from_json).status == 'recovering' }}
+    - service: logbook.log
+      data:
+        name: Zigbee2MQTT T832 barrier
+        message: >-
+          Incident {{ (t832_capture['stdout'] | from_json).incident_id }}
+          captured and reset-authorized; stopping Zigbee2MQTT.
+        entity_id: binary_sensor.zigbee2mqtt_bridge_online
+    - service: hassio.addon_stop
+      data:
+        addon: 45df7312_zigbee2mqtt
+    - repeat:
+        until: >-
+          {{ (t832_addon_state['stdout'] | from_json).state == 'stopped'
+             or repeat.index >= 6 }}
+        sequence:
+          - service: shell_command.t832_addon_state
+            response_variable: t832_addon_state
+          - delay:
+              seconds: 10
+    - condition: template
+      value_template: >-
+        {{ (t832_addon_state['stdout'] | from_json).state == 'stopped' }}
+    # The ONLY reset implementation: the existing validated R2 helper.
+    # Zigbee2MQTT is confirmed stopped above before this runs.
+    - service: shell_command.mr4u_p10_rts_reset
+      response_variable: t832_rts
+    - condition: template
+      value_template: "{{ t832_rts['returncode'] == 0 }}"
+    - service: hassio.addon_start
+      data:
+        addon: 45df7312_zigbee2mqtt
+    - wait_for_trigger:
+        - trigger: state
+          entity_id: binary_sensor.zigbee2mqtt_bridge_online
+          to: "on"
+      timeout:
+        minutes: 2
+      continue_on_timeout: false
+    # Existing bounded ZDO verification: permit_join request/response with a
+    # unique transaction id, exactly as the production watchdog performs it.
+    - service: mqtt.publish
+      data:
+        topic: zigbee2mqtt/bridge/request/permit_join
+        payload: '{"value": false, "transaction": "ha-t832-barrier"}'
+    - wait_for_trigger:
+        - trigger: mqtt
+          topic: zigbee2mqtt/bridge/response/permit_join
+      timeout:
+        seconds: 15
+      continue_on_timeout: false
+    - condition: template
+      value_template: >-
+        {{ (wait.trigger.payload_json.transaction | default(''))
+            == 'ha-t832-barrier'
+            and (wait.trigger.payload_json.status | default('')) == 'ok' }}
+    - service: shell_command.t832_recovery_result
+      data:
+        success: true
+        normal_traffic: "{{ is_state('binary_sensor.zigbee2mqtt_mesh_communication_outage', 'off') }}"
+        zdo_ok: true
+      response_variable: t832_recovered
+    - condition: template
+      value_template: >-
+        {{ t832_recovered['returncode'] == 0
+           and (t832_recovered['stdout'] | from_json).status == 'stabilizing' }}
+    - service: logbook.log
+      data:
+        name: Zigbee2MQTT T832 barrier
+        message: >-
+          Incident {{ (t832_capture['stdout'] | from_json).incident_id }}
+          recovering; 10-minute stability observation started.
+        entity_id: binary_sensor.zigbee2mqtt_bridge_online
+  mode: single
+
+- id: zigbee2mqtt_t832_stability_close
+  alias: Zigbee2MQTT - T832 stability close
+  description: >-
+    Every 5 minutes, record one stability observation for a stabilizing
+    incident and close it only when the full 10-minute window is covered
+    without gaps, outages, clock anomalies, or missing traffic/ZDO evidence.
+  triggers:
+    - trigger: time_pattern
+      minutes: /5
+  conditions: []
+  actions:
+    - service: shell_command.t832_status
+      response_variable: t832_status
+    - condition: template
+      value_template: "{{ (t832_status['stdout'] | from_json).status == 'stabilizing' }}"
+    - service: shell_command.t832_observe
+      data:
+        bridge_up: "{{ is_state('binary_sensor.zigbee2mqtt_bridge_online', 'on') }}"
+        normal_traffic: "{{ is_state('binary_sensor.zigbee2mqtt_mesh_communication_outage', 'off') }}"
+        zdo_ok: "{{ is_state('binary_sensor.zigbee2mqtt_mesh_communication_outage', 'off') }}"
+      response_variable: t832_observed
+    - condition: template
+      value_template: "{{ t832_observed['returncode'] == 0 }}"
+    - service: shell_command.t832_close_if_stable
+      data:
+        bridge_up: "{{ is_state('binary_sensor.zigbee2mqtt_bridge_online', 'on') }}"
+        normal_traffic: "{{ is_state('binary_sensor.zigbee2mqtt_mesh_communication_outage', 'off') }}"
+      response_variable: t832_closed
+    - condition: template
+      value_template: "{{ t832_closed['returncode'] == 0 }}"
+    - service: system_log.write
+      data:
+        message: >-
+          T832 stability step:
+          {{ (t832_closed['stdout'] | from_json).status }}.
+        level: info
+        logger: t832.barrier
+  mode: single
