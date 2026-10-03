@@ -141,18 +141,18 @@ static int decode_frame(uint32_t i, DecFrame *out)
   }
   if (memcmp(raw, "T8D1", 4) != 0) return 0;
   out->export_seq = (uint16_t)(raw[6] | ((uint16_t)raw[7] << 8));
-  out->caps = (uint32_t)raw[18] | ((uint32_t)raw[19] << 8) |
-              ((uint32_t)raw[20] << 16) | ((uint32_t)raw[21] << 24);
-  out->crit_over = (uint16_t)(raw[22] | ((uint16_t)raw[23] << 8));
-  out->rout_over = (uint16_t)(raw[24] | ((uint16_t)raw[25] << 8));
-  out->skipped = (uint16_t)(raw[26] | ((uint16_t)raw[27] << 8));
-  out->seq = (uint16_t)(raw[32] | ((uint16_t)raw[33] << 8));
-  out->kind = raw[34];
-  out->flags = raw[35];
-  out->a = (uint16_t)(raw[36] | ((uint16_t)raw[37] << 8));
-  out->b = (uint16_t)(raw[38] | ((uint16_t)raw[39] << 8));
-  out->c = (uint16_t)(raw[40] | ((uint16_t)raw[41] << 8));
-  out->repeat = (uint16_t)(raw[42] | ((uint16_t)raw[43] << 8));
+  out->caps = (uint32_t)raw[22] | ((uint32_t)raw[23] << 8) |
+              ((uint32_t)raw[24] << 16) | ((uint32_t)raw[25] << 24);
+  out->crit_over = (uint16_t)(raw[26] | ((uint16_t)raw[27] << 8));
+  out->rout_over = (uint16_t)(raw[28] | ((uint16_t)raw[29] << 8));
+  out->skipped = (uint16_t)(raw[30] | ((uint16_t)raw[31] << 8));
+  out->seq = (uint16_t)(raw[40] | ((uint16_t)raw[41] << 8));
+  out->kind = raw[42];
+  out->flags = raw[43];
+  out->a = (uint16_t)(raw[44] | ((uint16_t)raw[45] << 8));
+  out->b = (uint16_t)(raw[46] | ((uint16_t)raw[47] << 8));
+  out->c = (uint16_t)(raw[48] | ((uint16_t)raw[49] << 8));
+  out->repeat = (uint16_t)(raw[50] | ((uint16_t)raw[51] << 8));
   return 1;
 }
 
