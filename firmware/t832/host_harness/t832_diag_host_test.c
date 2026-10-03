@@ -2,7 +2,7 @@
  *
  * Exercises the REAL ../t832_diag_impl.inc on the host with stubbed SDK
  * symbols (t832_host_sdk.h + stubs/ti/drivers/dpl/ClockP.h + stubs/mt_af.h
- * + stubs/xdc/runtime/Memory.h). Allocation is forbidden: link with
+ * + stubs/ti/sysbios/runtime/Memory.h). Allocation is forbidden: link with
  * -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free so any heap
  * use by the recorder fails the link.
  *
@@ -18,7 +18,7 @@
 #include <string.h>
 
 #include "t832_host_sdk.h"
-#include "xdc/runtime/Memory.h"
+#include "ti/sysbios/runtime/Memory.h"
 
 #define CODE_REVISION_NUMBER 8320001u
 #define T832_BUILD_ID 0xA5A50001u
@@ -81,8 +81,8 @@ void HostMdi_capture(uint8_t cmdType, uint8_t cmdId, uint8_t len,
 
 #include "t832_diag_impl.inc"
 
-/* Defined after the .inc so xdc_runtime_IHeap_Handle is a complete type. */
-const xdc_runtime_IHeap_Handle Memory_defaultHeapInstance = 0;
+/* Defined after the .inc so IHeap_Handle is a complete type. */
+IHeap_Handle Memory_defaultHeapInstance = 0;
 
 void MT_BuildAndSendZToolResponse(uint8_t cmdType, uint8_t cmdId,
                                   uint8_t dataLen, uint8_t *dataPtr)

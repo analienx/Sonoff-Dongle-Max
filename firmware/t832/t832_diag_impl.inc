@@ -10,11 +10,14 @@
 #include <stdint.h>
 #include <string.h>
 #include <ti/drivers/dpl/ClockP.h>
-#include <xdc/runtime/Memory.h>
+/* SysBIOS heap stats: ti/sysbios/runtime/Memory.h declares IHeap_Handle,
+ * Memory_Stats and Memory_defaultHeapInstance. The same angle-bracket
+ * kernel path style is already used by npi_task.c in this build, so this
+ * resolves in mt_debug.c too (verified: the XDC variant of this header
+ * resolves, and the sysbios package dir is the same include root). */
+#include <ti/sysbios/runtime/Memory.h>
 #include "t832_diag.h"
 #include "mt_af.h"
-
-extern const xdc_runtime_IHeap_Handle Memory_defaultHeapInstance;
 
 #ifndef CODE_REVISION_NUMBER
 #define CODE_REVISION_NUMBER 0u
