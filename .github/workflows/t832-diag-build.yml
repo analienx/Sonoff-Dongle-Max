@@ -165,6 +165,7 @@ jobs:
           diag_allowed = control_allowed | {
               "kernel/tirtos7/packages/ti/sysbios/family/arm/cc26xx/Boot.c",
               "source/ti/zstack/mt/mt.c",
+              "source/ti/zstack/mt/mt.h",
               "source/ti/zstack/mt/mt_debug.c",
               "source/ti/zstack/mt/mt_task.c",
               "source/ti/zstack/mt/mt_zdo.c",
