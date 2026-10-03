@@ -109,6 +109,23 @@ jobs:
             echo "- XDCTools: 3.62.01.16"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Prefer pinned SysConfig 1.21.1 over CCS-bundled 1.21.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLED=$(find "$HOME/ti/ccs1280" -maxdepth 5 -type d -name 'sysconfig_1.21.0' -print -quit)
+          test -n "$BUNDLED" || { echo "::error::CCS-bundled SysConfig 1.21.0 not found"; exit 1; }
+          test -x "$HOME/ti/sysconfig_1.21.1/sysconfig_cli.sh" || { echo "::error::pinned SysConfig 1.21.1 missing"; exit 1; }
+          mv "$BUNDLED" "$BUNDLED.orig-1.21.0"
+          ln -s "$HOME/ti/sysconfig_1.21.1" "$BUNDLED"
+          test "$(readlink "$BUNDLED")" = "$HOME/ti/sysconfig_1.21.1"
+          "$BUNDLED/sysconfig_cli.sh" --version > /tmp/sysconfig-version.txt 2>&1 || true
+          cat /tmp/sysconfig-version.txt
+          {
+            echo "## T832 SysConfig pin"
+            echo "- CCS-bundled 1.21.0 redirected to standalone 1.21.1.3772 (SDK 8.32 requires >= 1.21.1)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TexasInstruments/simplelink-lowpower-f2-sdk
