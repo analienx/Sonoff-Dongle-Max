@@ -234,6 +234,7 @@ jobs:
             sudo apt-get install -y --no-install-recommends cmake
           fi
           cmake --version
+          export CMAKE="$(command -v cmake)"
           export TICLANG_ARMCOMPILER="$(dirname "$(dirname "$TIARMCLANG")")"
           export XDC_INSTALL_DIR="$XDC"
           export SYSCONFIG_TOOL="$SYSCONFIG"
