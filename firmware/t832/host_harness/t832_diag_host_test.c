@@ -171,13 +171,24 @@ static int find_kind(uint8_t kind, DecFrame *out)
   return 0;
 }
 
-/* Drain every pending record through the real export path. */
+/* Drain every pending record through the real export path. Periodic
+ * HEALTH/RESOURCE snapshots are disarmed while draining (they are covered
+ * by dedicated tests): the steady-state firmware intentionally generates
+ * aggregate records faster than a stalled link could drain them. */
 static void drain_all(void)
 {
   uint32_t guard = 0u;
   while ((t832Diag.critical_count || t832Diag.routine_count) && guard < 600u) {
-    advance_ms(5000u);
+    uint32_t before = host_frame_count;
+    t832Diag.last_health_ms = host_tick;
+    t832Diag.last_resource_ms = host_tick;
     T832Diag_exportPoll();
+    if (host_frame_count == before) {
+      advance_ms(5000u);
+      t832Diag.last_health_ms = host_tick;
+      t832Diag.last_resource_ms = host_tick;
+      T832Diag_exportPoll();
+    }
     wire_complete_last(111u);
     guard++;
   }
@@ -290,7 +301,7 @@ static void test_af_outstanding(void)
   fresh(9u);
   emit_one();
   T832Diag_commandDispatch(0x24u, 0x01u);
-  T832Diag_commandDispatch(0x64u, 0x02u);
+  T832Diag_commandDispatch(0x44u, 0x02u);
   CHECK(t832Diag.af_outstanding == 2u);
   CHECK(t832Diag.af_outstanding_max == 2u);
   T832Diag_commandDispatch(0x45u, 0x01u);
